@@ -41,5 +41,10 @@ Open the local URL printed by Vite. The API docs are available at `http://127.0.
 
 Document retrieval currently places bounded excerpts from recent uploads in the prompt. Semantic/vector search, authentication, scheduled reminders, and approved external tool execution are future phases. The initial API is intended for local development; add authentication and deployment hardening before exposing it to other users.
 
+## Project Team
+
+- **Lead Developer — Ken (Fushitowa):** Led Arisa AI’s end-to-end development and technical direction, including repository maintenance, application architecture, the FastAPI backend and API, SQLite database, and Groq integration.
+- **Assistant Developer — Lisa (Lizz):** Provided AI-assisted development support for Arisa AI, contributing to frontend and backend implementation, feature refinement, debugging, and project documentation.
+
 
 
