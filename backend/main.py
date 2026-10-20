@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-import fitz
+import pymupdf
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -15,7 +15,10 @@ from pydantic import BaseModel, Field
 load_dotenv()
 DB_PATH = Path(os.getenv("DATABASE_PATH", str(Path(__file__).parent / "lizz.db")))
 MAX_UPLOAD = int(os.getenv("MAX_UPLOAD_MB", "10")) * 1024 * 1024
-MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
+# Older setup guides used Llama 3.3, which Groq deprecated in August 2026.
+if MODEL in {"llama-3.3-70b-versatile", "llama-3.1-8b-instant"}:
+    MODEL = "openai/gpt-oss-120b"
 ALLOWED = {".pdf", ".txt", ".md"}
 
 app = FastAPI(title="Lizz AI API", version="0.1.0")
@@ -211,7 +214,7 @@ async def upload_document(file: UploadFile = File(...)):
         raise HTTPException(413, f"Files must be {MAX_UPLOAD // (1024 * 1024)} MB or smaller.")
     try:
         if ext == ".pdf":
-            with fitz.open(stream=raw, filetype="pdf") as pdf:
+            with pymupdf.open(stream=raw, filetype="pdf") as pdf:
                 content = "\n".join(page.get_text() for page in pdf)
         else:
             content = raw.decode("utf-8-sig")

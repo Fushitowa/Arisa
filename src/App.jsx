@@ -9,6 +9,16 @@ const starter = [
 ]
 const initialMessages = []
 
+async function readApiResponse(response) {
+  const body = await response.text()
+  let data
+  try { data = body ? JSON.parse(body) : null }
+  catch { throw new Error(`The API returned an invalid response (HTTP ${response.status}). Check the backend terminal.`) }
+  if (!response.ok) throw new Error(data?.detail || `The API request failed (HTTP ${response.status}).`)
+  if (data == null) throw new Error(`The API returned an empty response (HTTP ${response.status}). Check the backend terminal.`)
+  return data
+}
+
 function App() {
   const [chats, setChats] = useState([]), [chatId, setChatId] = useState(null), [messages, setMessages] = useState(initialMessages)
   const [input, setInput] = useState(''), [busy, setBusy] = useState(false), [section, setSection] = useState('Chat')
@@ -38,8 +48,7 @@ function App() {
     setMessages(old => [...old, userMessage])
     try {
       const response = await fetch(`${API}/chat`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ conversation_id: chatId, message: content }) })
-      const data = await response.json()
-      if (!response.ok) throw new Error(data.detail || 'Something went wrong.')
+      const data = await readApiResponse(response)
       if (data.conversation_id) setChatId(data.conversation_id)
       setMessages(old => [...old, { role: 'assistant', content: data.reply }]); refresh()
     } catch (e) {
