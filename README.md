@@ -1,4 +1,4 @@
-# Lizz AI
+# Arisa AI
 
 A personal AI workspace with a React/Vite frontend and a FastAPI backend. Conversations, user-saved memories, tasks, and extracted document text are stored in a local SQLite database. Groq credentials stay on the backend.
 

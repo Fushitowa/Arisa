@@ -21,7 +21,7 @@ if MODEL in {"llama-3.3-70b-versatile", "llama-3.1-8b-instant"}:
     MODEL = "openai/gpt-oss-120b"
 ALLOWED = {".pdf", ".txt", ".md"}
 
-app = FastAPI(title="Lizz AI API", version="0.1.0")
+app = FastAPI(title="Arisa AI API", version="0.1.0")
 app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
 
@@ -95,7 +95,7 @@ def chat(body: ChatRequest):
             prior = conn.execute("SELECT role,content FROM messages WHERE conversation_id=? ORDER BY created_at", (conversation_id,)).fetchall()
             memories = conn.execute("SELECT content FROM memories ORDER BY created_at DESC LIMIT 20").fetchall()
             docs = conn.execute("SELECT filename,content FROM documents ORDER BY created_at DESC LIMIT 8").fetchall()
-            context = "You are Lizz, a thoughtful and practical personal AI assistant. Be warm, clear, and concise.\n"
+            context = "You are Arisa, a thoughtful and practical personal AI assistant. Be warm, clear, and concise.\n"
             if memories:
                 context += "\nUser-saved memories (use only when relevant):\n" + "\n".join(f"- {m['content']}" for m in memories)
             if docs:
