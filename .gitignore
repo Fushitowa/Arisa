@@ -1,5 +1,7 @@
 node_modules/
 dist/
+release/
+release-*/
 backend/.venv/
 backend/.env
 backend/lizz.db

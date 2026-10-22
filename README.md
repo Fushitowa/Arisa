@@ -4,6 +4,35 @@ A personal AI workspace with a React/Vite frontend and a FastAPI backend. Conver
 
 ## Run locally
 
+### Voice desktop application
+
+The Windows desktop app is separate from the website. It opens directly in voice mode, and text messages typed there are also read aloud. The first time you run it, open PowerShell in the project folder and run:
+
+```powershell
+npm install
+cd backend
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+cd ..
+npm run desktop
+```
+
+The app starts the local API and Vite when needed. Before launching, copy `backend/.env.example` to `backend/.env` and put your Groq key in it. On the first normal launch the app adds itself to Windows startup and stays in the system tray after you close its window. At sign-in, it listens for “Arisa”; saying the name opens the app and starts voice input. Wake listening pauses while the app window is open, then resumes when you close it. Use the tray menu to pause wake listening, disable Windows startup, reopen the app, or quit it. Windows may ask for microphone permission.
+
+The wake-word model is downloaded once (about 40 MB) and runs locally. That listener analyzes the ambient microphone stream locally and does not save recordings. After the wake word opens the app, spoken messages use the existing `/api/arisa/voice` endpoint for transcription and AI replies, and Arisa reads replies aloud. If API speech generation or playback fails, the app falls back to a built-in device voice. The app needs the existing Python backend dependencies and a Groq key in `backend/.env` for development. The packaged app stores its environment file and SQLite database in its per-user application data folder.
+
+To build a Windows installer after installing dependencies, run `npm run desktop:dist`. The installer is written to `release/`. The installed app still requires Python with the backend requirements installed; it does not include a Python runtime. Install those packages with `python -m pip install -r <Arisa installation folder>\resources\backend\requirements.txt`. On Windows, the packaged app creates `%APPDATA%\arisa-ai\backend.env` on first run; add `GROQ_API_KEY=your_key_here` there. Its SQLite database is saved beside that file. The regular website remains available using the normal Vite instructions below.
+
+### Quick Start desktop app
+
+Open `quick_start.pyw` from File Explorer to open the desktop control panel. Choose **Start All** to run the API/backend and frontend together, or start either service on its own. The panel also shows the SQLite database status and opens its folder. SQLite is managed by the API, so it does not run as a separate server. Press **Stop All** to stop the services.
+
+You can also open the panel from a terminal in the project root:
+
+```powershell
+python start.py
+```
+
 ### 1. Start the API
 
 ```powershell
@@ -36,10 +65,14 @@ Open the local URL printed by Vite. The API docs are available at `http://127.0.
 - Responsive dark chat workspace with conversation search and history
 - Groq chat completions, using `GROQ_API_KEY` and `GROQ_MODEL` from the backend environment
 - SQLite conversation, memory, and task persistence
+- Persistent protected creator identity for Ken, stored separately from editable personal memories
+- Personal memories can be created, edited, deleted, and explicitly saved by saying “Remember that …” in text or voice chat
 - PDF, TXT, and Markdown upload with size and file type validation
 - Saved memory context and bounded uploaded document excerpts in chat prompts
 
 Document retrieval currently places bounded excerpts from recent uploads in the prompt. Semantic/vector search, authentication, scheduled reminders, and approved external tool execution are future phases. The initial API is intended for local development; add authentication and deployment hardening before exposing it to other users.
+
+Arisa is configured as Ken’s single-user personal assistant: Ken is both the creator and the only user of this installation. The protected identity is initialized in the separate `creator_identity` SQLite table at backend startup, exposed read-only by the API, and cannot be removed through personal-memory controls. Ordinary memories belong to Ken and remain in the `memories` table, where they can be edited or deleted. The app does not have accounts or sign-in because this setup is for one local user.
 
 ## Project Team
 
