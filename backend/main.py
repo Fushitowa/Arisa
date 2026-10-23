@@ -444,16 +444,42 @@ async def _elevenlabs_audio(text: str) -> bytes:
 
 # ── /api/arisa/voice — transcribe + LLM response ─────────────────────────────
 
+async def _transcribe_upload(file: UploadFile, client) -> str:
+    audio_bytes = await file.read(MAX_VOICE_UPLOAD + 1)
+    if not audio_bytes:
+        raise HTTPException(400, "Empty audio received.")
+    if len(audio_bytes) > MAX_VOICE_UPLOAD:
+        raise HTTPException(413, "Voice recording is too large. Keep it under 25 MB and try again.")
+
+    content_type = (file.content_type or "audio/webm").split(";", 1)[0].strip().lower()
+    ext_map = {
+        "audio/webm": ".webm", "video/webm": ".webm",
+        "audio/ogg": ".ogg", "application/ogg": ".ogg",
+        "audio/mp4": ".mp4", "audio/x-m4a": ".m4a", "audio/m4a": ".m4a",
+        "audio/wav": ".wav", "audio/x-wav": ".wav",
+        "audio/mpeg": ".mp3", "audio/mp3": ".mp3",
+        "audio/flac": ".flac", "audio/x-flac": ".flac",
+    }
+    ext = ext_map.get(content_type)
+    if not ext:
+        raise HTTPException(415, f"Unsupported voice audio format: {content_type or 'unknown'}.")
+    raw_transcription = client.audio.transcriptions.create(
+        model=WHISPER_MODEL,
+        file=(f"voice{ext}", audio_bytes, content_type),
+        response_format="text",
+        prompt="The speaker is talking to Arisa AI. Names may include Arisa and Ken.",
+    )
+    return (raw_transcription if isinstance(raw_transcription, str) else raw_transcription.text).strip()
+
+
 @app.post("/api/arisa/voice")
 async def voice_chat(
     file: UploadFile = File(...),
     conversation_id: Optional[str] = Form(None),
 ):
     """
-    Accept a raw audio blob (webm/ogg/mp4), transcribe it with Groq Whisper,
-    generate a concise voice-optimised Arisa response, persist it, and return
-    the transcript + reply text.  A separate /api/arisa/tts call synthesises
-    audio so the frontend can start playing while the transcript is displayed.
+    Transcribe a voice turn, generate a concise voice-optimised response, persist it, and return the
+    transcript + reply. A separate /api/arisa/tts call synthesises the audio.
     """
     api_key = os.getenv("GROQ_API_KEY")
     if not api_key:
@@ -463,35 +489,7 @@ async def voice_chat(
         from groq import Groq
         client = Groq(api_key=api_key)
 
-        # 1. Read audio
-        audio_bytes = await file.read(MAX_VOICE_UPLOAD + 1)
-        if not audio_bytes:
-            raise HTTPException(400, "Empty audio received.")
-        if len(audio_bytes) > MAX_VOICE_UPLOAD:
-            raise HTTPException(413, "Voice recording is too large. Keep it under 25 MB and try again.")
-
-        # 2. Transcribe — pass original content-type so Whisper picks the right decoder
-        content_type = (file.content_type or "audio/webm").split(";", 1)[0].strip().lower()
-        ext_map = {
-            "audio/webm": ".webm", "video/webm": ".webm",
-            "audio/ogg": ".ogg", "application/ogg": ".ogg",
-            "audio/mp4": ".mp4", "audio/x-m4a": ".m4a", "audio/m4a": ".m4a",
-            "audio/wav": ".wav", "audio/x-wav": ".wav",
-            "audio/mpeg": ".mp3", "audio/mp3": ".mp3",
-            "audio/flac": ".flac", "audio/x-flac": ".flac",
-        }
-        ext = ext_map.get(content_type)
-        if not ext:
-            raise HTTPException(415, f"Unsupported voice audio format: {content_type or 'unknown'}.")
-        raw_transcription = client.audio.transcriptions.create(
-            model=WHISPER_MODEL,
-            file=(f"voice{ext}", audio_bytes, content_type),
-            response_format="text",
-        )
-        user_text = (
-            raw_transcription if isinstance(raw_transcription, str)
-            else raw_transcription.text
-        ).strip()
+        user_text = await _transcribe_upload(file, client)
 
         if not user_text:
             raise HTTPException(400, "No speech detected — please speak clearly and try again.")
