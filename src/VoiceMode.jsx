@@ -3,8 +3,9 @@ import { MessageSquare, Mic, MicOff, Send, Volume2, X } from 'lucide-react'
 import ArisaCharacter, { inferArisaEmotion } from './ArisaCharacter'
 
 const API              = '/api'
-const SILENCE_MS       = 2000 // Wait two seconds of silence before sending the voice turn
-const SPEECH_START_MS  = 200  // Ignore brief clicks before arming silence detection
+const SILENCE_MS       = 950  // Reply shortly after speech ends, without cutting off normal pauses
+const SPEECH_START_MS  = 150  // Reject brief clicks while arming quickly
+const VAD_CALIBRATION_MS = 300 // Establish the room's noise level before adapting the voice gate
 const MAX_RECORD_MS    = 300000 // Safety limit for an unattended recording (5 minutes)
 const MIN_BLOB_BYTES   = 1500  // Ignore clicks while retaining short, quiet utterances
 
@@ -249,18 +250,42 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
     setStatusHint('Waiting for you to speak…')
 
     try {
+      // Ask the browser's microphone pipeline to suppress noise and keep voice
+      // levels steady. These are best-effort constraints because support varies.
+      const supported = navigator.mediaDevices.getSupportedConstraints?.() || {}
+      const audioConstraints = {
+        echoCancellation: supported.echoCancellation ? { ideal: true } : true,
+        noiseSuppression: supported.noiseSuppression ? { ideal: true } : true,
+        autoGainControl: supported.autoGainControl ? { ideal: true } : true,
+      }
+      if (supported.channelCount) audioConstraints.channelCount = { ideal: 1 }
       const stream = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+        audio: audioConstraints,
         video: false,
       })
       streamRef.current = stream
 
-      // Mic audio analysis (for orb visualiser + silence detection)
+      // Keep the visualiser on the processed mic signal, and apply a speech
+      // band-pass filter only to the VAD analysis. The recorder still captures
+      // the browser-cleaned microphone stream for Whisper.
       const actx = new AudioContext()
       audioCtxRef.current = actx
       const src  = actx.createMediaStreamSource(stream)
-      const an   = actx.createAnalyser(); an.fftSize = 512
+      const an   = actx.createAnalyser(); an.fftSize = 1024
       src.connect(an)
+      const highPass = actx.createBiquadFilter()
+      highPass.type = 'highpass'
+      highPass.frequency.value = 110
+      highPass.Q.value = 0.7
+      const lowPass = actx.createBiquadFilter()
+      lowPass.type = 'lowpass'
+      lowPass.frequency.value = 3800
+      lowPass.Q.value = 0.7
+      const vadAnalyser = actx.createAnalyser()
+      vadAnalyser.fftSize = 1024
+      src.connect(highPass)
+      highPass.connect(lowPass)
+      lowPass.connect(vadAnalyser)
       micAnalyserRef.current = an
       setMicAnalyser(an)
 
@@ -280,19 +305,27 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
       setOrbState('listening')
       setSession(true)
 
-      // Adapt the voice gate to room noise so a steady fan or mic hiss does not
-      // keep a turn open forever, while silence between words does not end it.
+      // Estimate noise before speech starts, then freeze that baseline for the
+      // turn. A rolling baseline that follows louder sound can prevent silence
+      // detection from ever firing in a noisy room.
       const startMs = Date.now()
       let speechStart = null
       let silenceStart = null
       let hasHeardSpeech = false
       let noiseFloor = 0.003
-      const energySamples = []
-      const timeBuf = new Float32Array(an.fftSize)
+      let speechLevel = 0
+      const noiseSamples = []
+      const timeBuf = new Float32Array(vadAnalyser.fftSize)
+
+      const updateNoiseFloor = () => {
+        if (!noiseSamples.length) return
+        const ordered = [...noiseSamples].sort((a, b) => a - b)
+        noiseFloor = ordered[Math.floor((ordered.length - 1) * 0.2)]
+      }
 
       const tick = () => {
         if (!micAnalyserRef.current) return
-        an.getFloatTimeDomainData(timeBuf)
+        vadAnalyser.getFloatTimeDomainData(timeBuf)
         let energy = 0
         for (const sample of timeBuf) energy += sample * sample
         const rms = Math.sqrt(energy / timeBuf.length)
@@ -300,37 +333,39 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
         const now = Date.now()
         if (now - startMs >= MAX_RECORD_MS) { stopRecording(); return }
 
-        energySamples.push(rms)
-        if (energySamples.length > 60) energySamples.shift()
-        if (energySamples.length >= 8) {
-          const ordered = [...energySamples].sort((a, b) => a - b)
-          noiseFloor = ordered[Math.floor((ordered.length - 1) * 0.2)]
+        if (!hasHeardSpeech) {
+          noiseSamples.push(rms)
+          if (noiseSamples.length > 90) noiseSamples.shift()
+          updateNoiseFloor()
         }
-        const speechThreshold = Math.max(0.008, noiseFloor * 2.0)
-        const silenceThreshold = Math.max(0.005, noiseFloor * 1.35)
-
-        // Give the mic a short calibration window; samples still record while
-        // this runs, so speech at the start is not lost.
-        if (!hasHeardSpeech && now - startMs < 350) {
-          silenceRafRef.current = requestAnimationFrame(tick)
-          return
-        }
+        const speechThreshold = Math.max(0.006, noiseFloor * 1.55)
 
         if (!hasHeardSpeech) {
-          if (rms >= speechThreshold) {
+          if (now - startMs < VAD_CALIBRATION_MS) {
+            // Keep recording during calibration so the beginning of speech is
+            // preserved, then arm the detector as soon as calibration ends.
+            speechStart = rms >= Math.max(0.008, noiseFloor * 1.8) ? (speechStart || now) : null
+          } else if (rms >= speechThreshold) {
             speechStart = speechStart || now
             if (now - speechStart >= SPEECH_START_MS) {
               hasHeardSpeech = true
+              speechLevel = rms
               setStatusHint('I hear you — pause when you’re done…')
             }
           } else {
             speechStart = null
           }
-        } else if (rms < silenceThreshold) {
+        } else {
+          const silenceThreshold = Math.max(noiseFloor * 1.3, speechLevel * 0.28)
+          if (rms < silenceThreshold) {
           silenceStart = silenceStart || now
           if (now - silenceStart >= SILENCE_MS) { stopRecording(); return }
-        } else {
-          silenceStart = null
+          } else {
+            silenceStart = null
+            // Track the user's recent speech level, but never let room noise
+            // raise the frozen noise baseline during this turn.
+            speechLevel = speechLevel * 0.85 + rms * 0.15
+          }
         }
         silenceRafRef.current = requestAnimationFrame(tick)
       }
