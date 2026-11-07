@@ -21,6 +21,8 @@ The app starts the local API and Vite when needed. Before launching, copy `backe
 
 The wake-word model is downloaded once (about 40 MB) and runs locally. That listener analyzes the ambient microphone stream locally and does not save recordings. After the wake word opens the app, spoken messages use the existing `/api/arisa/voice` endpoint for transcription and AI replies, and Arisa reads replies aloud. If API speech generation or playback fails, the app falls back to a built-in device voice. The app needs the existing Python backend dependencies and a Groq key in `backend/.env` for development. The packaged app stores its environment file and SQLite database in its per-user application data folder.
 
+In the Windows desktop app, say “Open” followed by Spotify, Brave, VLC media player, TikTok, Google Chrome, Steam, Discord, VS Code, Calculator, Notepad, or File Explorer. Windows verifies local app launches before Arisa gives a short spoken confirmation; confirmations use the device voice so they do not wait for online speech generation. Regular voice replies use streamed speech playback and concise answers to reduce the delay before Arisa starts talking. TikTok opens in the default browser. Commands must name one of these apps; Arisa does not receive general access to files, keyboard input, or arbitrary commands.
+
 To build a Windows installer after installing dependencies, run `npm run desktop:dist`. The installer is written to `release/`. The installed app still requires Python with the backend requirements installed; it does not include a Python runtime. Install those packages with `python -m pip install -r <Arisa installation folder>\resources\backend\requirements.txt`. On Windows, the packaged app creates `%APPDATA%\arisa-ai\backend.env` on first run; add `GROQ_API_KEY=your_key_here` there. Its SQLite database is saved beside that file. The regular website remains available using the normal Vite instructions below.
 
 ### Quick Start desktop app
@@ -64,13 +66,14 @@ Open the local URL printed by Vite. The API docs are available at `http://127.0.
 
 - Responsive dark chat workspace with conversation search and history
 - Groq chat completions, using `GROQ_API_KEY` and `GROQ_MODEL` from the backend environment
+- Restricted local desktop app launching for direct voice or text commands
 - SQLite conversation, memory, and task persistence
 - Persistent protected creator identity for Ken, stored separately from editable personal memories
 - Personal memories can be created, edited, deleted, and explicitly saved by saying “Remember that …” in text or voice chat
 - PDF, TXT, and Markdown upload with size and file type validation
 - Saved memory context and bounded uploaded document excerpts in chat prompts
 
-Document retrieval currently places bounded excerpts from recent uploads in the prompt. Semantic/vector search, authentication, scheduled reminders, and approved external tool execution are future phases. The initial API is intended for local development; add authentication and deployment hardening before exposing it to other users.
+Document retrieval currently places bounded excerpts from recent uploads in the prompt. Semantic/vector search, authentication, scheduled reminders, and additional approved desktop actions are future phases. The initial API is intended for local development; add authentication and deployment hardening before exposing it to other users.
 
 Arisa is configured as Ken’s single-user personal assistant: Ken is both the creator and the only user of this installation. The protected identity is initialized in the separate `creator_identity` SQLite table at backend startup, exposed read-only by the API, and cannot be removed through personal-memory controls. Ordinary memories belong to Ken and remain in the `memories` table, where they can be edited or deleted. The app does not have accounts or sign-in because this setup is for one local user.
 

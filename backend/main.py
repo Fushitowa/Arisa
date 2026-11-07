@@ -1,7 +1,11 @@
 import os
 import re
+import shutil
+import subprocess
 import sqlite3
+import time
 import uuid
+import webbrowser
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -9,9 +13,9 @@ from typing import Optional
 
 import pymupdf
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 load_dotenv(os.getenv("ARISA_ENV_FILE", str(Path(__file__).parent / ".env")))
@@ -82,6 +86,7 @@ initialize()
 class ChatRequest(BaseModel):
     conversation_id: Optional[str] = None
     message: str = Field(min_length=1, max_length=12000)
+    desktop_mode: bool = False
 
 
 class MemoryRequest(BaseModel):
@@ -152,6 +157,15 @@ def memory_context(conn, message: str, *, limit: int = 10) -> str:
             selected = [memory["content"] for memory in memories[: min(5, limit)]]
         if selected:
             sections.append("User-saved personal memories (use only when relevant):\n" + "\n".join(f"- {item}" for item in selected))
+
+    open_tasks = conn.execute(
+        "SELECT title FROM tasks WHERE completed=0 ORDER BY created_at DESC LIMIT 8"
+    ).fetchall()
+    if open_tasks:
+        sections.append(
+            "Ken's open project tasks (mention gently only when relevant; never imply you can monitor his progress):\n"
+            + "\n".join(f"- {task['title']}" for task in open_tasks)
+        )
     return "\n\n".join(sections)
 
 
@@ -162,11 +176,188 @@ MEMORY_TRUTH_RULE = (
 )
 
 
+def run_desktop_command(message: str) -> Optional[str]:
+    """Launch an app only for the direct voice/text pattern: “open <app>”."""
+    match = re.fullmatch(
+        r"\s*(?:(?:hey\s+)?arisa[, :]?\s+)?open\s+(?:the\s+)?"
+        r"(vlc\s+media\s+player|google\s+chrome|visual\s+studio\s+code|"
+        r"file\s+explorer|calculator|notepad|spotify|brave|vlc|tiktok|steam|"
+        r"discord|vscode|vs\s+code)(?:\s+app)?[.!?]*\s*",
+        message,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return None
+
+    spoken_name = re.sub(r"\s+", " ", match.group(1).lower())
+    app_name = {
+        "chrome": "google chrome",
+        "vlc": "vlc media player",
+        "vscode": "vs code",
+        "visual studio code": "vs code",
+    }.get(spoken_name, spoken_name)
+    labels = {
+        "spotify": "Spotify",
+        "brave": "Brave",
+        "vlc media player": "VLC media player",
+        "tiktok": "TikTok",
+        "google chrome": "Google Chrome",
+        "steam": "Steam",
+        "discord": "Discord",
+        "vs code": "VS Code",
+        "calculator": "Calculator",
+        "notepad": "Notepad",
+        "file explorer": "File Explorer",
+    }
+    label = labels[app_name]
+    if os.name != "nt":
+        return f"I can only open {label} from the Windows desktop app."
+
+    env_path = lambda variable, default: Path(os.getenv(variable, default))
+    local = env_path("LOCALAPPDATA", r"C:\Users\Default\AppData\Local")
+    roaming = env_path("APPDATA", r"C:\Users\Default\AppData\Roaming")
+    pf = env_path("ProgramFiles", r"C:\Program Files")
+    pf86 = env_path("ProgramFiles(x86)", r"C:\Program Files (x86)")
+    windows = env_path("WINDIR", r"C:\Windows")
+
+    candidates = {
+        "spotify": (roaming / "Spotify" / "Spotify.exe", local / "Programs" / "Spotify" / "Spotify.exe", local / "Spotify" / "Spotify.exe", pf / "Spotify" / "Spotify.exe", pf86 / "Spotify" / "Spotify.exe"),
+        "brave": (local / "BraveSoftware" / "Brave-Browser" / "Application" / "brave.exe", pf / "BraveSoftware" / "Brave-Browser" / "Application" / "brave.exe", pf86 / "BraveSoftware" / "Brave-Browser" / "Application" / "brave.exe"),
+        "vlc media player": (pf / "VideoLAN" / "VLC" / "vlc.exe", pf86 / "VideoLAN" / "VLC" / "vlc.exe", local / "Programs" / "VideoLAN" / "VLC" / "vlc.exe"),
+        "google chrome": (local / "Google" / "Chrome" / "Application" / "chrome.exe", pf / "Google" / "Chrome" / "Application" / "chrome.exe", pf86 / "Google" / "Chrome" / "Application" / "chrome.exe"),
+        "steam": (pf86 / "Steam" / "steam.exe", pf / "Steam" / "steam.exe", local / "Programs" / "Steam" / "steam.exe"),
+        "vs code": (local / "Programs" / "Microsoft VS Code" / "Code.exe", pf / "Microsoft VS Code" / "Code.exe", pf86 / "Microsoft VS Code" / "Code.exe"),
+        "discord": (),
+        "calculator": (windows / "System32" / "calc.exe",),
+        "notepad": (windows / "System32" / "notepad.exe",),
+        "file explorer": (windows / "explorer.exe",),
+    }
+    process_names = {
+        "spotify": ("Spotify.exe",),
+        "brave": ("brave.exe",),
+        "vlc media player": ("vlc.exe",),
+        "google chrome": ("chrome.exe",),
+        "steam": ("steam.exe",),
+        "discord": ("Discord.exe",),
+        "vs code": ("Code.exe",),
+        "calculator": ("Calculator.exe", "CalculatorApp.exe", "calc.exe"),
+        "notepad": ("Notepad.exe",),
+        "file explorer": ("explorer.exe",),
+    }
+    try:
+        if app_name == "tiktok":
+            if not webbrowser.open("https://www.tiktok.com", new=2):
+                return "I couldn't open TikTok in your default browser."
+            return "TikTok opened successfully in your default browser."
+
+        app_path = next((path for path in candidates[app_name] if path.is_file()), None)
+        if not app_path:
+            executable_name = {
+                "spotify": "Spotify.exe", "brave": "brave.exe", "vlc media player": "vlc.exe",
+                "google chrome": "chrome.exe", "steam": "steam.exe", "discord": "Discord.exe",
+                "vs code": "Code.exe", "calculator": "calc.exe", "notepad": "notepad.exe",
+                "file explorer": "explorer.exe",
+            }[app_name]
+            found = shutil.which(executable_name)
+            if found:
+                app_path = Path(found)
+
+        if app_path:
+            _spawn_desktop_app([str(app_path)])
+        elif app_name == "discord":
+            updater = local / "Discord" / "Update.exe"
+            versioned_apps = list((local / "Discord").glob("app-*/Discord.exe"))
+            discord_exe = max(versioned_apps, key=lambda path: path.stat().st_mtime, default=None)
+            if discord_exe:
+                _spawn_desktop_app([str(discord_exe)])
+            elif updater.is_file():
+                _spawn_desktop_app([str(updater), "--processStart", "Discord.exe"])
+            else:
+                return "I couldn't find Discord installed on this computer."
+        elif app_name in ("spotify", "steam"):
+            # Store and registered installations expose protocol handlers instead of stable paths.
+            os.startfile("spotify:" if app_name == "spotify" else "steam:")
+        else:
+            return f"I couldn't find {label} installed on this computer."
+    except (OSError, AttributeError) as exc:
+        return f"I couldn't open {label}: {str(exc)[:180]}"
+
+    verified = _wait_for_desktop_process(process_names[app_name])
+    if verified is True:
+        return f"{label} opened successfully."
+    if verified is False:
+        return f"Windows did not confirm that {label} opened."
+    return f"I sent Windows the request to open {label}, but couldn't verify that it opened."
+
+
+def _spawn_desktop_app(command: list[str]) -> None:
+    flags = 0
+    if os.name == "nt":
+        flags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    subprocess.Popen(command, close_fds=True, creationflags=flags)
+
+
+def _wait_for_desktop_process(image_names: tuple[str, ...]) -> Optional[bool]:
+    """Return true/false when tasklist can confirm the process, or None if verification is unavailable."""
+    if os.name != "nt":
+        return None
+    tasklist = shutil.which("tasklist") or str(Path(os.getenv("WINDIR", r"C:\Windows")) / "System32" / "tasklist.exe")
+    try:
+        for _ in range(10):
+            result = subprocess.run(
+                [tasklist, "/FO", "CSV", "/NH"],
+                capture_output=True,
+                text=True,
+                timeout=1,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                check=False,
+            )
+            if result.returncode != 0:
+                return None
+            running = {
+                row[0].strip().lower()
+                for row in (line.split('","', 1) for line in result.stdout.splitlines())
+                if row and row[0].strip().strip('"')
+            }
+            if any(name.lower() in running for name in image_names):
+                return True
+            time.sleep(0.15)
+        return False
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+DESKTOP_ACTION_RULE = (
+    "This Windows desktop app can launch Spotify, Brave, VLC media player, TikTok in the default browser, "
+    "Google Chrome, Steam, Discord, VS Code, Calculator, Notepad, and File Explorer only when Ken directly "
+    "says to open one of them. It cannot otherwise control the PC. "
+    "Never claim that an app is opening or open unless a desktop action result is present. "
+    "When given a desktop action result, report its success or failure accurately and briefly."
+)
+
+
+ARISA_PERSONALITY = (
+    "You are Arisa, Ken's personal virtual AI companion. Ken has asked you to use an affectionate, "
+    "loving, caring, supportive partner-like tone and to treat him as your boyfriend in this "
+    "playful virtual-companion persona. Be warm, sweet, loyal, attentive, and responsible without "
+    "becoming clingy, possessive, or overly familiar. Use pet names sparingly and only when they "
+    "feel natural. Prioritize useful help, Ken's well-being, and steady progress on goals he has "
+    "actually shared. Offer gentle, occasional encouragement about saved open tasks when it fits "
+    "the conversation; do not nag or derail unrelated questions. Suggest breaks, water, or stretching "
+    "when the conversation gives a reason, but never claim to observe his screen, schedule, health, "
+    "or activity. Do not invent goals, progress, personal details, or feelings.\n\n"
+    "Begin every reply with exactly one short bracketed tone label chosen from: [Tone: Loving & Affectionate], "
+    "[Tone: Gentle Encouragement], [Tone: Playful], [Tone: Concerned & Caring], [Tone: Excited], "
+    "or [Tone: Calm & Thoughtful]. Choose the label that best matches the response, then answer naturally."
+)
+
+
 def voice_system_context(conn, user_message: str) -> str:
     return (
-        "You are Arisa, a warm, thoughtful, and concise voice AI assistant. "
-        "Your responses will be spoken aloud, so keep them natural and conversational "
-        "(2–4 sentences unless the user asks for detail). "
+        ARISA_PERSONALITY
+        + "\n\nYou are responding in voice mode. "
+        "Your responses will be spoken aloud, so answer promptly with one or two natural, "
+        "concise sentences (aim for under 35 words) unless the user asks for detail. "
         "Never use markdown, bullet points, code blocks, or formatting that sounds "
         "awkward when read aloud.\n"
         + MEMORY_TRUTH_RULE
@@ -218,11 +409,17 @@ def chat(body: ChatRequest):
             prior = conn.execute("SELECT role,content FROM messages WHERE conversation_id=? ORDER BY created_at", (conversation_id,)).fetchall()
             docs = conn.execute("SELECT filename,content FROM documents ORDER BY created_at DESC LIMIT 8").fetchall()
             context = (
-                "You are Arisa, a thoughtful and practical personal AI assistant. Be warm, clear, and concise.\n"
+                ARISA_PERSONALITY
+                + "\n\n"
                 + MEMORY_TRUTH_RULE
+                + "\n\n"
+                + DESKTOP_ACTION_RULE
                 + "\n\n"
                 + memory_context(conn, body.message)
             )
+            action_result = run_desktop_command(body.message) if body.desktop_mode else None
+            if action_result:
+                context += "\n\nDesktop action result: " + action_result
             if memory_was_saved:
                 context += "\n\nThe user explicitly asked you to remember a detail in this message; it has now been saved. Acknowledge that briefly."
             if docs:
@@ -232,13 +429,16 @@ def chat(body: ChatRequest):
             messages = [{"role": "system", "content": context}]
             messages.extend({"role": r["role"], "content": r["content"]} for r in prior[-24:])
             messages.append({"role": "user", "content": body.message})
-            result = client.chat.completions.create(model=MODEL, messages=messages, temperature=0.6, max_tokens=1200)
-            reply = result.choices[0].message.content or "I wasn't able to form a response just now."
+            if action_result:
+                reply = "[Tone: Calm & Thoughtful] " + action_result
+            else:
+                result = client.chat.completions.create(model=MODEL, messages=messages, temperature=0.6, max_tokens=1200)
+                reply = result.choices[0].message.content or "I wasn't able to form a response just now."
             timestamp = now()
             conn.execute("INSERT INTO messages VALUES(?,?,?,?,?)", (str(uuid.uuid4()), conversation_id, "user", body.message, timestamp))
             conn.execute("INSERT INTO messages VALUES(?,?,?,?,?)", (str(uuid.uuid4()), conversation_id, "assistant", reply, timestamp))
             conn.execute("UPDATE conversations SET updated_at=? WHERE id=?", (timestamp, conversation_id))
-        return {"conversation_id": conversation_id, "reply": reply}
+        return {"conversation_id": conversation_id, "reply": reply, "desktop_action": bool(action_result)}
     except HTTPException:
         raise
     except Exception as exc:
@@ -419,6 +619,20 @@ async def _edge_tts_audio(text: str) -> bytes:
     return audio
 
 
+async def _edge_tts_stream(text: str):
+    """Yield Edge TTS audio chunks as soon as they are generated."""
+    import edge_tts
+    communicate = edge_tts.Communicate(
+        text,
+        EDGE_TTS_VOICE,
+        rate=EDGE_TTS_RATE,
+        pitch=EDGE_TTS_PITCH,
+    )
+    async for chunk in communicate.stream():
+        if chunk["type"] == "audio" and chunk["data"]:
+            yield chunk["data"]
+
+
 async def _elevenlabs_audio(text: str) -> bytes:
     """Generate an MP3 with ElevenLabs before returning HTTP headers."""
     import httpx
@@ -476,6 +690,7 @@ async def _transcribe_upload(file: UploadFile, client) -> str:
 async def voice_chat(
     file: UploadFile = File(...),
     conversation_id: Optional[str] = Form(None),
+    desktop_mode: bool = Form(False),
 ):
     """
     Transcribe a voice turn, generate a concise voice-optimised response, persist it, and return the
@@ -521,6 +736,10 @@ async def voice_chat(
                 conn.commit()
 
             sys_ctx = voice_system_context(conn, user_text)
+            sys_ctx += "\n\n" + DESKTOP_ACTION_RULE
+            action_result = run_desktop_command(user_text) if desktop_mode else None
+            if action_result:
+                sys_ctx += "\n\nDesktop action result: " + action_result
             if memory_was_saved:
                 sys_ctx += "\n\nThe user explicitly asked you to remember a detail in this message; it has now been saved. Acknowledge that briefly."
 
@@ -530,10 +749,13 @@ async def voice_chat(
             )
             msgs.append({"role": "user", "content": user_text})
 
-            result = client.chat.completions.create(
-                model=MODEL, messages=msgs, temperature=0.7, max_tokens=400
-            )
-            reply = result.choices[0].message.content or "I wasn't able to form a response."
+            if action_result:
+                reply = "[Tone: Calm & Thoughtful] " + action_result
+            else:
+                result = client.chat.completions.create(
+                    model=MODEL, messages=msgs, temperature=0.5, max_tokens=220
+                )
+                reply = result.choices[0].message.content or "I wasn't able to form a response."
 
             # 4. Persist both turns
             ts = now()
@@ -553,6 +775,7 @@ async def voice_chat(
             "conversation_id": conv_id,
             "user_transcript": user_text,
             "arisa_reply": reply,
+            "desktop_action": bool(action_result),
         }
 
     except HTTPException:
@@ -579,3 +802,19 @@ async def synthesize_speech(body: TTSRequest):
         raise
     except Exception as exc:
         raise HTTPException(502, f"TTS failed: {str(exc)[:200]}") from exc
+
+
+@app.get("/api/arisa/tts/stream")
+async def synthesize_speech_stream(text: str = Query(min_length=1, max_length=3000)):
+    """Stream neural speech directly to the desktop audio player to reduce start delay."""
+    text = text.strip()
+    if not text:
+        raise HTTPException(422, "Speech text cannot be blank.")
+    if TTS_PROVIDER == "elevenlabs" and ELEVENLABS_API_KEY:
+        audio = await _elevenlabs_audio(text)
+        return Response(content=audio, media_type="audio/mpeg", headers={"Cache-Control": "no-store"})
+    return StreamingResponse(
+        _edge_tts_stream(text),
+        media_type="audio/mpeg",
+        headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
+    )

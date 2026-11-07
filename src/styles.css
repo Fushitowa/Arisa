@@ -72,31 +72,119 @@
   gap: 18px;
 }
 
-/* The clickable orb wrapper */
-.orb-container {
+/* The character is the voice control and reacts to Arisa's current state. */
+.arisa-character-button {
+  width: 276px;
+  height: 294px;
   background: transparent;
   border: none;
   padding: 0;
-  border-radius: 50%;
   cursor: pointer;
-  transition: transform .2s, filter .2s;
-  display: grid;
-  place-items: center;
+  display: block;
   outline: none;
 }
-.orb-container:hover    { transform: scale(1.045); }
-.orb-container:active   { transform: scale(0.965); }
-.orb-container:focus-visible {
+.arisa-character-button:hover { transform: translateY(-2px); }
+.arisa-character-button:active { transform: scale(.98); }
+.arisa-character-button:focus-visible {
   outline: 2px solid #a28cff;
-  outline-offset: 10px;
-  border-radius: 50%;
+  outline-offset: 3px;
+  border-radius: 18px;
 }
+.arisa-character {
+  --character-glow: rgba(162,140,255,.24);
+  width: 100%;
+  height: 100%;
+  position: relative;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  isolation: isolate;
+}
+.arisa-character img {
+  position: relative;
+  z-index: 1;
+  display: block;
+  width: auto;
+  height: 100%;
+  max-width: 100%;
+  object-fit: contain;
+  user-select: none;
+  filter: drop-shadow(0 10px 22px rgba(0,0,0,.25));
+}
+.character-aura {
+  position: absolute;
+  z-index: -1;
+  width: 180px;
+  height: 180px;
+  left: 50%;
+  top: 39%;
+  transform: translate(-50%,-50%);
+  border-radius: 50%;
+  background: radial-gradient(circle, var(--character-glow), transparent 70%);
+  opacity: .9;
+  animation: character-breathe 3.6s ease-in-out infinite;
+}
+.character-sound-rings { position: absolute; z-index: 0; inset: 16% 10% 25%; pointer-events: none; }
+.character-sound-rings i {
+  position: absolute;
+  inset: 8%;
+  border: 1px solid color-mix(in srgb, var(--character-glow), transparent 45%);
+  border-radius: 48% 52% 45% 55%;
+  opacity: 0;
+}
+.character-listening { --character-glow: rgba(93,238,245,.27); }
+.character-listening .character-sound-rings i { animation: character-listen-ring 2.1s ease-out infinite; }
+.character-listening .character-sound-rings i:nth-child(2) { animation-delay: .7s; }
+.character-listening .character-sound-rings i:nth-child(3) { animation-delay: 1.4s; }
+.character-thinking { --character-glow: rgba(232,121,249,.27); }
+.character-thinking img { animation: character-think 2.3s ease-in-out infinite; }
+.character-speaking { --character-glow: rgba(110,231,183,.3); }
+.character-speaking img { animation: character-talk .42s ease-in-out infinite alternate; }
+.character-speaking .character-aura {
+  animation: none;
+  transform: translate(-50%,-50%) scale(var(--audio-scale,1));
+  transition: transform 75ms linear;
+  opacity: .55;
+}
+.expression-happy, .expression-celebrating { --character-glow: rgba(250,204,21,.28); }
+.expression-concerned, .expression-nervous { --character-glow: rgba(96,165,250,.25); }
+.expression-surprised { --character-glow: rgba(251,146,60,.28); }
+.expression-encouraging, .expression-determined { --character-glow: rgba(110,231,183,.27); }
+.character-voice-bars {
+  position: absolute;
+  z-index: 2;
+  left: 50%;
+  bottom: 5px;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 22px;
+  padding: 0 10px;
+  border: 1px solid #ffffff22;
+  border-radius: 20px;
+  background: #11101acc;
+  backdrop-filter: blur(8px);
+}
+.character-voice-bars i {
+  width: 3px;
+  height: 6px;
+  border-radius: 3px;
+  background: #bcaaff;
+  animation: character-voice-bar .55s ease-in-out infinite alternate;
+}
+.character-voice-bars i:nth-child(2), .character-voice-bars i:nth-child(4) { animation-delay: .15s; }
+.character-voice-bars i:nth-child(3) { animation-delay: .3s; }
+.character-voice-bars i:nth-child(5) { animation-delay: .22s; }
+@keyframes character-breathe { 0%,100% { transform: translate(-50%,-50%) scale(.94); opacity: .65; } 50% { transform: translate(-50%,-50%) scale(1.08); opacity: 1; } }
+@keyframes character-listen-ring { 0% { transform: scale(.76); opacity: 0; } 35% { opacity: .45; } 100% { transform: scale(1.08); opacity: 0; } }
+@keyframes character-think { 0%,100% { transform: translateY(0) rotate(0); } 50% { transform: translateY(-4px) rotate(1deg); } }
+@keyframes character-talk { from { transform: translateY(0) scale(1); } to { transform: translateY(-3px) scale(1.012); } }
+@keyframes character-voice-bar { from { height: 4px; } to { height: 17px; } }
 
-/* Per-state drop-shadow glow */
-.orb-idle      { filter: drop-shadow(0 0 26px rgba(162,140,255,0.22)); }
-.orb-listening { filter: drop-shadow(0 0 30px rgba(93,238,245,0.32)); }
-.orb-thinking  { filter: drop-shadow(0 0 24px rgba(232,121,249,0.28)); }
-.orb-speaking  { filter: drop-shadow(0 0 28px rgba(110,231,183,0.28)); }
+@media (prefers-reduced-motion: reduce) {
+  .character-speaking img { animation-duration: .8s; }
+}
 
 .voice-state-label {
   font: 500 13px 'DM Sans', sans-serif;
@@ -233,6 +321,7 @@
 
 /* ── Responsive ── */
 @media(max-width:660px) {
+  .arisa-character-button { width: 238px; height: 254px; }
   .voice-mode    { padding: 28px 14px 24px; gap: 22px; }
   .voice-title   { font-size: 23px; }
   .voice-header  { flex-direction: column; gap: 10px; }
@@ -250,3 +339,4 @@
 .voice-text-composer textarea::placeholder{color:#777380}
 .voice-text-composer button{width:38px;height:38px;flex:0 0 38px;display:grid;place-items:center;border:0;border-radius:12px;background:#8b6cff;color:white}
 .voice-text-composer button:disabled{opacity:.38;cursor:default}
+.brand-mark img{display:block;width:100%;height:100%;object-fit:cover;border-radius:8px}

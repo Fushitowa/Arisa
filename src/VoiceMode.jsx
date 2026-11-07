@@ -1,12 +1,12 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { MessageSquare, Mic, MicOff, Send, Volume2, X } from 'lucide-react'
-import VoiceOrb from './VoiceOrb'
+import ArisaCharacter, { inferArisaEmotion } from './ArisaCharacter'
 
 const API              = '/api'
-const SILENCE_MS       = 1400 // End the turn after a natural pause
+const SILENCE_MS       = 2000 // Wait two seconds of silence before sending the voice turn
 const SPEECH_START_MS  = 200  // Ignore brief clicks before arming silence detection
 const MAX_RECORD_MS    = 300000 // Safety limit for an unattended recording (5 minutes)
-const MIN_BLOB_BYTES   = 3000  // blobs smaller than this are ignored (breath / click noise)
+const MIN_BLOB_BYTES   = 1500  // Ignore clicks while retaining short, quiet utterances
 
 async function readApiResult(response, label) {
   const body = await response.text()
@@ -55,6 +55,10 @@ function speakWithSystemVoice(text) {
   })
 }
 
+function removeToneLabel(text = '') {
+  return text.replace(/^\s*\[Tone:\s*[^\]]+\]\s*/i, '').trim()
+}
+
 export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
   // ── UI state ──────────────────────────────────────────────────────────────
   const [orbState,        setOrbStateUI]      = useState('idle')
@@ -67,6 +71,7 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
   const [statusHint,      setStatusHint]      = useState('')
   const [textInput,       setTextInput]       = useState('')
   const [textBusy,        setTextBusy]        = useState(false)
+  const [arisaEmotion,    setArisaEmotion]    = useState('calm')
 
   // ── Refs (used inside callbacks to avoid stale closures) ─────────────────
   const orbStateRef    = useRef('idle')
@@ -116,26 +121,51 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
   }, [])
 
   // ── TTS playback ──────────────────────────────────────────────────────────
-  const playTTS = useCallback(async text => {
+  const playTTS = useCallback(async (text, immediate = false) => {
+    const spokenText = removeToneLabel(text)
+    if (!spokenText) return
+    if (immediate) {
+      setStatusHint('Speaking…')
+      setOrbState('speaking')
+      try {
+        await speakWithSystemVoice(spokenText)
+      } catch (e) {
+        setError(`Arisa couldn't speak the confirmation. ${e.message || ''}`.trim())
+      } finally {
+        setStatusHint('')
+        if (sessionRef.current) setTimeout(() => startListening(), 200)
+        else setOrbState('idle')
+      }
+      return
+    }
     setStatusHint('Speaking…')
     let objectUrl = null
     try {
-      const res = await fetch(`${API}/arisa/tts`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text }),
-      })
-      if (!res.ok) {
-        const body = await res.text()
-        let detail
-        try { detail = JSON.parse(body)?.detail } catch {}
-        throw new Error(detail || body?.slice(0, 180) || `Speech generation failed (HTTP ${res.status}).`)
-      }
+      let audio
+      if (desktopMode) {
+        // Let Chromium play the MP3 response as it streams from Edge TTS. The
+        // previous POST/blob flow waited for the entire reply audio first.
+        const streamUrl = `${API}/arisa/tts/stream?text=${encodeURIComponent(spokenText)}`
+        audio = new Audio(streamUrl)
+        audio.preload = 'auto'
+      } else {
+        const res = await fetch(`${API}/arisa/tts`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text: spokenText }),
+        })
+        if (!res.ok) {
+          const body = await res.text()
+          let detail
+          try { detail = JSON.parse(body)?.detail } catch {}
+          throw new Error(detail || body?.slice(0, 180) || `Speech generation failed (HTTP ${res.status}).`)
+        }
 
-      const blob = await res.blob()
-      if (!blob.size) throw new Error('The speech API returned an empty audio file.')
-      objectUrl = URL.createObjectURL(blob)
-      const audio = new Audio(objectUrl)
+        const blob = await res.blob()
+        if (!blob.size) throw new Error('The speech API returned an empty audio file.')
+        objectUrl = URL.createObjectURL(blob)
+        audio = new Audio(objectUrl)
+      }
       audioElRef.current = audio
 
       // Wire up Web Audio for the speaking visualiser
@@ -160,7 +190,7 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
         setSpeakerAnalyser(null)
         setStatusHint('Speaking with your device voice…')
         setOrbState('speaking')
-        await speakWithSystemVoice(text)
+        await speakWithSystemVoice(spokenText)
       } catch (fallbackError) {
         setError(`Arisa could not speak. ${e.message || 'TTS API failed.'} ${fallbackError.message || ''}`.trim())
       }
@@ -180,7 +210,7 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
         setOrbState('idle')
       }
     }
-  }, [])  // startListening referenced via closure below — hoisted after definition
+  }, [desktopMode])  // startListening referenced via closure below — hoisted after definition
 
   // ── Process audio blob → backend ──────────────────────────────────────────
   const processAudio = useCallback(async blob => {
@@ -194,15 +224,15 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
       const fd = new FormData()
       fd.append('file', blob, 'voice.webm')
       if (convIdRef.current) fd.append('conversation_id', convIdRef.current)
+      fd.append('desktop_mode', String(desktopMode))
 
       const res = await fetch(`${API}/arisa/voice`, { method: 'POST', body: fd })
       const data = await readApiResult(res, 'Voice API request')
-
-      setTranscript(data.user_transcript)
-      setReply(data.arisa_reply)
+      setTranscript(data.user_transcript || '')
+      setReply(data.arisa_reply || '')
       convIdRef.current = data.conversation_id
-
-      await playTTS(data.arisa_reply)
+      setArisaEmotion(inferArisaEmotion(data.arisa_reply || ''))
+      await playTTS(data.arisa_reply || '', data.desktop_action === true)
     } catch (e) {
       setError(e.message === 'Failed to fetch'
         ? 'Could not reach the voice API. Make sure Arisa’s backend is running, then try again.'
@@ -210,7 +240,7 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
       setOrbState('idle')
       setStatusHint('')
     }
-  }, [playTTS])
+  }, [desktopMode, playTTS])
 
   // ── Start listening ───────────────────────────────────────────────────────
   const startListening = useCallback(async () => {
@@ -220,7 +250,7 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: true, noiseSuppression: true },
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
         video: false,
       })
       streamRef.current = stream
@@ -276,8 +306,8 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
           const ordered = [...energySamples].sort((a, b) => a - b)
           noiseFloor = ordered[Math.floor((ordered.length - 1) * 0.2)]
         }
-        const speechThreshold = Math.max(0.014, noiseFloor * 2.0)
-        const silenceThreshold = Math.max(0.009, noiseFloor * 1.35)
+        const speechThreshold = Math.max(0.008, noiseFloor * 2.0)
+        const silenceThreshold = Math.max(0.005, noiseFloor * 1.35)
 
         // Give the mic a short calibration window; samples still record while
         // this runs, so speech at the start is not lost.
@@ -337,13 +367,14 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
       const response = await fetch(`${API}/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ conversation_id: convIdRef.current, message }),
+        body: JSON.stringify({ conversation_id: convIdRef.current, message, desktop_mode: desktopMode }),
       })
       const data = await response.json()
       if (!response.ok) throw new Error(data.detail || 'Chat request failed.')
       convIdRef.current = data.conversation_id
       setReply(data.reply)
-      await playTTS(data.reply)
+      setArisaEmotion(inferArisaEmotion(data.reply))
+      await playTTS(data.reply, data.desktop_action === true)
     } catch (e) {
       setError(e.message || 'Could not send that message.')
     } finally {
@@ -354,7 +385,7 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
   // ── Orb click handler ─────────────────────────────────────────────────────
   const handleOrbClick = () => {
     const s = orbStateRef.current
-    if (s === 'idle')      startListening()
+    if (s === 'idle') startListening()
     else if (s === 'listening') stopRecording()
     else if (s === 'speaking') {
       audioElRef.current?.pause()
@@ -412,21 +443,21 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
         </div>
       </div>
 
-      {/* Orb stage */}
+      {/* Character stage */}
       <div className="voice-stage">
         <button
-          className={`orb-container orb-${orbState}`}
+          className={`arisa-character-button character-button-${orbState}`}
           onClick={handleOrbClick}
           aria-label={stateLabel}
         >
-          <VoiceOrb state={orbState} analyser={activeAnalyser} />
+          <ArisaCharacter state={orbState} emotion={arisaEmotion} analyser={activeAnalyser} />
         </button>
 
         <p className="voice-state-label">{statusHint || stateLabel}</p>
 
         {orbState === 'listening' && (
           <p className="voice-hint">
-            Speak naturally. Arisa replies after you finish and pause briefly. Tap “Done speaking” to send sooner.
+            Speak clearly at a natural pace. Arisa waits for a pause, then replies.
           </p>
         )}
 

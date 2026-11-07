@@ -83,7 +83,7 @@ function WorkspaceApp() {
   const filtered = chats.filter(c => c.title?.toLowerCase().includes(query.toLowerCase()))
   return <div className="app-shell">
     {sidebar && <aside className="sidebar">
-      <div className="brand-row"><button className="brand" onClick={newChat}><span className="brand-mark"><Sparkles size={16}/></span><span>Arisa<span className="brand-ai">AI</span></span></button><button className="icon-button collapse" aria-label="Close sidebar" onClick={() => setSidebar(false)}><ChevronLeft size={18}/></button></div>
+      <div className="brand-row"><button className="brand" onClick={newChat}><span className="brand-mark"><img src="/arisa-icon.png" alt="" aria-hidden="true"/></span><span>Arisa<span className="brand-ai">AI</span></span></button><button className="icon-button collapse" aria-label="Close sidebar" onClick={() => setSidebar(false)}><ChevronLeft size={18}/></button></div>
       <button className="new-chat" onClick={newChat}><SquarePen size={16}/><span>New conversation</span><span className="shortcut">⌘ K</span></button>
       <div className="nav-group"><div className="nav-label">YOUR SPACE</div>
         <Nav icon={MessageSquare} label="Chat" active={section === 'Chat'} onClick={() => setSection('Chat')}/>

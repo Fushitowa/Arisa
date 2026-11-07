@@ -7,7 +7,11 @@ const http = require('node:http')
 const dev = !app.isPackaged
 const root = app.getAppPath()
 const backendDir = app.isPackaged ? path.join(process.resourcesPath, 'backend') : path.join(root, 'backend')
+// Keep the packaged app on its own port so it cannot silently reuse an older
+// development backend that happens to be running on port 8000.
+const backendPort = dev ? 8000 : 8001
 const hiddenAtLaunch = process.argv.includes('--hidden')
+const appIconPath = path.join(root, dev ? 'public' : 'dist', 'arisa-icon.png')
 let windowRef
 let tray
 let listener
@@ -45,19 +49,19 @@ async function waitFor(port, route, timeoutMs = 25000) {
 }
 
 async function startBackend() {
-  if (await requestOk(8000, '/api/health')) return
+  if (await requestOk(backendPort, '/api/health')) return
   const userData = app.getPath('userData')
   const envFile = dev ? path.join(backendDir, '.env') : path.join(userData, 'backend.env')
   const dbFile = dev ? path.join(backendDir, 'lizz.db') : path.join(userData, 'arisa.db')
   if (!dev && !fs.existsSync(envFile)) {
     fs.copyFileSync(path.join(backendDir, '.env.example'), envFile)
   }
-  backend = spawn(pythonPath(), ['-m', 'uvicorn', 'main:app', '--host', '127.0.0.1', '--port', '8000'], {
+  backend = spawn(pythonPath(), ['-m', 'uvicorn', 'main:app', '--host', '127.0.0.1', '--port', String(backendPort)], {
     cwd: backendDir, windowsHide: true, stdio: 'ignore',
     env: { ...process.env, ARISA_ENV_FILE: envFile, DATABASE_PATH: dbFile },
   })
   backend.on('error', () => tray?.displayBalloon({ title: 'Arisa AI', content: 'Could not start the API. Check Python and backend dependencies.' }))
-  const ready = await waitFor(8000, '/api/health')
+  const ready = await waitFor(backendPort, '/api/health')
   if (!ready) tray?.displayBalloon({ title: 'Arisa AI', content: 'The API did not start. Check Python, backend/.env, and backend dependencies.' })
 }
 
@@ -67,7 +71,7 @@ async function startVite() {
     const dist = path.join(root, 'dist')
     http.createServer((req, res) => {
       if (req.url.startsWith('/api/')) {
-        const proxy = http.request({ hostname: '127.0.0.1', port: 8000, path: req.url, method: req.method, headers: req.headers }, upstream => {
+        const proxy = http.request({ hostname: '127.0.0.1', port: backendPort, path: req.url, method: req.method, headers: req.headers }, upstream => {
           res.writeHead(upstream.statusCode || 502, upstream.headers)
           upstream.pipe(res)
         })
@@ -134,7 +138,7 @@ function startWakeBridge() {
 }
 
 function createTray() {
-  const icon = nativeImage.createFromDataURL(`data:image/svg+xml,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32"><rect x="2" y="2" width="28" height="28" rx="9" fill="#8b6cff"/><path d="M16 7l2.2 6.8L25 16l-6.8 2.2L16 25l-2.2-6.8L7 16l6.8-2.2z" fill="white"/></svg>')}`)
+  const icon = nativeImage.createFromPath(appIconPath)
   tray = new Tray(icon)
   tray.setToolTip('Arisa AI is listening for “Arisa” on this PC')
   tray.on('double-click', () => showWindow())
@@ -180,6 +184,7 @@ function createWindow() {
     width: 880, height: 720, minWidth: 400, minHeight: 520,
     show: !hiddenAtLaunch,
     backgroundColor: '#09090d',
+    icon: appIconPath,
     title: 'Arisa AI',
     webPreferences: { preload: path.join(root, 'electron', 'preload.cjs'), contextIsolation: true, nodeIntegration: false, sandbox: true },
   })

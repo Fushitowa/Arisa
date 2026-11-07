@@ -1,7 +1,7 @@
 {
   "name": "arisa-ai",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.1.14",
   "description": "A personal AI workspace with a Windows voice desktop app",
   "author": "Ken (Fushitowa)",
   "type": "module",
@@ -13,20 +13,53 @@
     "desktop": "electron .",
     "desktop:dist": "npm run build && electron-builder --win nsis"
   },
-  "dependencies": { "lucide-react": "^0.468.0", "react": "^18.3.1", "react-dom": "^18.3.1" },
-  "devDependencies": { "@vitejs/plugin-react": "^4.3.4", "electron": "^37.2.0", "electron-builder": "^26.0.12", "vite": "^6.0.5" },
+  "dependencies": {
+    "lucide-react": "^0.468.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "electron": "^37.2.0",
+    "electron-builder": "^26.0.12",
+    "vite": "^6.0.5"
+  },
   "build": {
     "appId": "ai.arisa.desktop",
     "productName": "Arisa AI",
     "electronDist": "node_modules/electron/dist",
-    "directories": { "output": "release" },
-    "files": ["electron/**/*", "dist/**/*", "package.json"],
-    "extraResources": [{
-      "from": "backend",
-      "to": "backend",
-      "filter": ["**/*", "!.venv/**", "!.env", "!lizz.db", "!tests/**", "!__pycache__/**"]
-    }],
-    "win": { "target": "nsis" },
-    "nsis": { "oneClick": false, "perMachine": false, "allowToChangeInstallationDirectory": true }
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "electron/**/*",
+      "dist/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "backend",
+        "to": "backend",
+        "filter": [
+          "**/*",
+          "!.env",
+          "!lizz.db",
+          "!tests/**",
+          "!__pycache__/**"
+        ]
+      }
+    ],
+    "win": {
+      "icon": "assets/branding/arisa-app-icon.ico",
+      "target": "nsis"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "installerIcon": "assets/branding/arisa-app-icon.ico",
+      "uninstallerIcon": "assets/branding/arisa-app-icon.ico",
+      "installerHeaderIcon": "assets/branding/arisa-app-icon.ico"
+    }
   }
 }
