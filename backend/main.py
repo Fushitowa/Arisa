@@ -32,10 +32,11 @@ ALLOWED = {".pdf", ".txt", ".md"}
 # ── Voice / TTS ──────────────────────────────────────────────────────────────
 TTS_PROVIDER       = os.getenv("TTS_PROVIDER", "edge")            # "edge" | "elevenlabs"
 EDGE_TTS_VOICE     = os.getenv("EDGE_TTS_VOICE", "en-US-JennyNeural")
-EDGE_TTS_RATE      = os.getenv("EDGE_TTS_RATE", "-5%")
-EDGE_TTS_PITCH     = os.getenv("EDGE_TTS_PITCH", "+2Hz")
+EDGE_TTS_RATE      = os.getenv("EDGE_TTS_RATE", "+0%")
+EDGE_TTS_PITCH     = os.getenv("EDGE_TTS_PITCH", "+0Hz")
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
 ELEVENLABS_VOICE   = os.getenv("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM")
+ELEVENLABS_MODEL   = os.getenv("ELEVENLABS_MODEL_ID", "eleven_flash_v2_5")
 
 app = FastAPI(title="Arisa AI API", version="0.1.0")
 app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
@@ -634,7 +635,7 @@ async def _edge_tts_stream(text: str):
 
 
 async def _elevenlabs_audio(text: str) -> bytes:
-    """Generate an MP3 with ElevenLabs before returning HTTP headers."""
+    """Generate speech with a consistent, natural female voice profile."""
     import httpx
     url = f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVENLABS_VOICE}/stream"
     headers = {
@@ -644,16 +645,76 @@ async def _elevenlabs_audio(text: str) -> bytes:
     }
     payload = {
         "text": text,
-        "model_id": "eleven_monolingual_v1",
-        "voice_settings": {"stability": 0.5, "similarity_boost": 0.75},
+        "model_id": ELEVENLABS_MODEL,
+        "voice_settings": {
+            "stability": 0.48,
+            "similarity_boost": 0.82,
+            "style": 0.0,
+            "use_speaker_boost": True,
+            "speed": 1.0,
+        },
     }
     async with httpx.AsyncClient(timeout=60.0) as client:
-        response = await client.post(url, json=payload, headers=headers)
+        response = await client.post(
+            url,
+            params={"output_format": "mp3_44100_128"},
+            json=payload,
+            headers=headers,
+        )
     if response.status_code != 200:
         raise HTTPException(502, f"ElevenLabs TTS request failed (HTTP {response.status_code}).")
     if not response.content:
         raise HTTPException(502, "ElevenLabs returned no audio.")
     return response.content
+
+
+async def _elevenlabs_audio_stream(text: str):
+    """Open ElevenLabs' streaming endpoint and yield MP3 chunks as they arrive."""
+    import httpx
+
+    url = f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVENLABS_VOICE}/stream"
+    headers = {"xi-api-key": ELEVENLABS_API_KEY, "Content-Type": "application/json", "Accept": "audio/mpeg"}
+    payload = {
+        "text": text,
+        "model_id": ELEVENLABS_MODEL,
+        "voice_settings": {
+            "stability": 0.48,
+            "similarity_boost": 0.82,
+            "style": 0.0,
+            "use_speaker_boost": True,
+            "speed": 1.0,
+        },
+    }
+    client = httpx.AsyncClient(timeout=httpx.Timeout(60.0, connect=10.0))
+    try:
+        request = client.build_request(
+            "POST",
+            url,
+            params={"output_format": "mp3_44100_128"},
+            json=payload,
+            headers=headers,
+        )
+        response = await client.send(request, stream=True)
+    except Exception as exc:
+        await client.aclose()
+        raise HTTPException(502, f"ElevenLabs could not start speech: {str(exc)[:160]}") from exc
+
+    if response.status_code != 200:
+        detail = (await response.aread()).decode("utf-8", errors="replace")[:180]
+        await response.aclose()
+        await client.aclose()
+        raise HTTPException(502, f"ElevenLabs speech failed (HTTP {response.status_code}): {detail}")
+
+    async def chunks():
+        try:
+            async for chunk in response.aiter_bytes():
+                if chunk:
+                    yield chunk
+        finally:
+            await response.aclose()
+            await client.aclose()
+
+    return chunks()
 
 
 # ── /api/arisa/voice — transcribe + LLM response ─────────────────────────────
@@ -791,7 +852,9 @@ async def synthesize_speech(body: TTSRequest):
     """Convert text to speech and stream the MP3 back to the client."""
     text = body.text.strip()
     try:
-        if TTS_PROVIDER == "elevenlabs" and ELEVENLABS_API_KEY:
+        if TTS_PROVIDER == "elevenlabs" and not ELEVENLABS_API_KEY:
+            raise HTTPException(503, "ElevenLabs is selected but ELEVENLABS_API_KEY is not configured.")
+        if TTS_PROVIDER == "elevenlabs":
             audio = await _elevenlabs_audio(text)
         else:
             # Default: edge-tts (free, no key required). Buffer first so upstream
@@ -810,9 +873,14 @@ async def synthesize_speech_stream(text: str = Query(min_length=1, max_length=30
     text = text.strip()
     if not text:
         raise HTTPException(422, "Speech text cannot be blank.")
-    if TTS_PROVIDER == "elevenlabs" and ELEVENLABS_API_KEY:
-        audio = await _elevenlabs_audio(text)
-        return Response(content=audio, media_type="audio/mpeg", headers={"Cache-Control": "no-store"})
+    if TTS_PROVIDER == "elevenlabs":
+        if not ELEVENLABS_API_KEY:
+            raise HTTPException(503, "ElevenLabs is selected but ELEVENLABS_API_KEY is not configured.")
+        return StreamingResponse(
+            await _elevenlabs_audio_stream(text),
+            media_type="audio/mpeg",
+            headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
+        )
     return StreamingResponse(
         _edge_tts_stream(text),
         media_type="audio/mpeg",
