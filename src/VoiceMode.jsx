@@ -183,7 +183,7 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
   }, [])
 
   // ── TTS playback ──────────────────────────────────────────────────────────
-  const playTTS = useCallback(async (text, immediate = false, { streamChunk = false } = {}) => {
+  const playTTS = useCallback(async (text, immediate = false, { streamChunk = false, preparedAudio = null } = {}) => {
     setArisaEmotion(inferArisaEmotion(text))
     const spokenText = removeToneLabel(text)
     if (!spokenText) return
@@ -208,21 +208,40 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
     }
     setStatusHint('Speaking…')
     let audio = null
+    let source = null
+    let analyser = null
+    let settleAudio = null
+    playback.cancel = () => {
+      playback.cancelled = true
+      audio?.pause()
+      if (audio) {
+        audio.currentTime = 0
+        audio.removeAttribute('src')
+        audio.load()
+      }
+      settleAudio?.()
+    }
+    speechPlaybackRef.current = playback
     try {
-      // Play progressive audio chunks in both web and desktop voice mode so
-      // playback can begin before the entire response has been synthesized.
+      // Streamed replies can prefetch the next chunk while the current chunk plays.
       const streamUrl = `${API}/arisa/tts/stream?text=${encodeURIComponent(spokenText)}`
-      audio = new Audio(streamUrl)
+      audio = preparedAudio || new Audio(streamUrl)
       audio.preload = 'auto'
       audioElRef.current = audio
 
-      // Wire up Web Audio for the speaking visualiser
-      const actx = new AudioContext()
-      audioCtxRef.current = actx
-      const src  = actx.createMediaElementSource(audio)
-      const an   = actx.createAnalyser(); an.fftSize = 1024
-      src.connect(an); an.connect(actx.destination)
-      setSpeakerAnalyser(an)
+      // Reuse one context through a streamed reply instead of rebuilding it at each period.
+      const AudioContextType = window.AudioContext || window.webkitAudioContext
+      let actx = audioCtxRef.current
+      if (!actx || actx.state === 'closed') {
+        actx = new AudioContextType()
+        audioCtxRef.current = actx
+      }
+      if (actx.state === 'suspended') await actx.resume()
+      if (playback.cancelled) return
+      source = actx.createMediaElementSource(audio)
+      analyser = actx.createAnalyser(); analyser.fftSize = 1024
+      source.connect(analyser); analyser.connect(actx.destination)
+      setSpeakerAnalyser(analyser)
       setOrbState('speaking')
 
       await new Promise((resolve, reject) => {
@@ -234,15 +253,7 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
           if (error) reject(error)
           else resolve()
         }
-        playback.cancel = () => {
-          playback.cancelled = true
-          audio.pause()
-          audio.currentTime = 0
-          audio.removeAttribute('src')
-          audio.load()
-          settle()
-        }
-        speechPlaybackRef.current = playback
+        settleAudio = () => settle()
         audio.onended = () => settle()
         audio.onerror = () => playback.cancelled
           ? settle()
@@ -253,8 +264,8 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
       try {
         if (playback.cancelled) return
         audioElRef.current?.pause()
-        if (audioCtxRef.current?.state !== 'closed') await audioCtxRef.current?.close()
-        audioCtxRef.current = null
+        if (!streamChunk && audioCtxRef.current?.state !== 'closed') await audioCtxRef.current?.close()
+        if (!streamChunk) audioCtxRef.current = null
         setSpeakerAnalyser(null)
         setStatusHint('Speaking with your device voice…')
         setOrbState('speaking')
@@ -265,11 +276,13 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
     } finally {
       if (speechPlaybackRef.current === playback) speechPlaybackRef.current = null
       if (audioElRef.current === audio) audioElRef.current = null
-      setSpeakerAnalyser(null)
-      if (audioCtxRef.current?.state !== 'closed') {
+      try { source?.disconnect() } catch {}
+      try { analyser?.disconnect() } catch {}
+      if (!streamChunk) setSpeakerAnalyser(null)
+      if (!streamChunk && audioCtxRef.current?.state !== 'closed') {
         try { await audioCtxRef.current.close() } catch {}
       }
-      audioCtxRef.current = null
+      if (!streamChunk) audioCtxRef.current = null
       if (!streamChunk) {
         setStatusHint('')
         // Auto-loop: jump straight back into listening if the session is still on
@@ -306,6 +319,9 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
       if (cancelled || !responseFinished || speechDraining || speechQueue.length) return
       if (streamedReplyCancelRef.current === cancelStreamedResponse) streamedReplyCancelRef.current = null
       setSpeakerAnalyser(null)
+      const context = audioCtxRef.current
+      audioCtxRef.current = null
+      if (context && context.state !== 'closed') context.close().catch(() => {})
       setStatusHint('')
       setOrbState('idle')
       if (sessionRef.current) {
@@ -318,17 +334,34 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
       if (cancelled) return
       cancelled = true
       responseFinished = true
+      for (const item of speechQueue) {
+        if (!item.audio) continue
+        item.audio.pause()
+        item.audio.removeAttribute('src')
+        item.audio.load()
+      }
       speechQueue.length = 0
       controller.abort()
       resolveSpeechComplete()
     }
     streamedReplyCancelRef.current = cancelStreamedResponse
 
+    const prefetchNextSpeech = () => {
+      const item = speechQueue[0]
+      if (!speechDraining || !item || item.audio) return
+      const streamUrl = `${API}/arisa/tts/stream?text=${encodeURIComponent(removeToneLabel(item.text))}`
+      item.audio = new Audio(streamUrl)
+      item.audio.preload = 'auto'
+      item.audio.load()
+    }
+
     const drainSpeechQueue = async () => {
       if (speechDraining) return
       speechDraining = true
       while (speechQueue.length && !cancelled) {
-        await playTTS(speechQueue.shift(), false, { streamChunk: true })
+        const item = speechQueue.shift()
+        prefetchNextSpeech()
+        await playTTS(item.text, false, { streamChunk: true, preparedAudio: item.audio })
       }
       speechDraining = false
       finishResponse()
@@ -352,7 +385,8 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
         partialReply = partialReply ? `${partialReply} ${sentence}` : sentence
         setReply(partialReply)
         setArisaEmotion(inferArisaEmotion(partialReply))
-        speechQueue.push(sentence)
+        speechQueue.push({ text: sentence, audio: null })
+        prefetchNextSpeech()
         void drainSpeechQueue()
       } else if (event === 'done') {
         responseFinished = true
@@ -360,7 +394,8 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
         setReply(finalReply)
         setArisaEmotion(inferArisaEmotion(finalReply))
         if (!receivedSentence && finalReply) {
-          speechQueue.push(finalReply)
+          speechQueue.push({ text: finalReply, audio: null })
+          prefetchNextSpeech()
           void drainSpeechQueue()
         }
         finishResponse()
@@ -406,6 +441,8 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
         setSpeakerAnalyser(null)
         setOrbState('idle')
         setStatusHint('')
+        if (audioCtxRef.current?.state !== 'closed') audioCtxRef.current?.close().catch(() => {})
+        audioCtxRef.current = null
       }
     }
   }, [desktopMode, playTTS])

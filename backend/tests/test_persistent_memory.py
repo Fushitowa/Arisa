@@ -22,7 +22,7 @@ captured_system_prompts: list[str] = []
 
 
 class FakeGroq:
-    def __init__(self, api_key: str):
+    def __init__(self, api_key: str, **_options):
         self.audio = types.SimpleNamespace(
             transcriptions=types.SimpleNamespace(create=self.transcribe)
         )

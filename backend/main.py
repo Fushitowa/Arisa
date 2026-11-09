@@ -1,4 +1,5 @@
 import os
+import asyncio
 import json
 import re
 import shutil
@@ -25,6 +26,10 @@ MAX_UPLOAD = int(os.getenv("MAX_UPLOAD_MB", "10")) * 1024 * 1024
 MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
 VOICE_MODEL = os.getenv("GROQ_VOICE_MODEL", "openai/gpt-oss-20b")
 WHISPER_MODEL = os.getenv("GROQ_WHISPER_MODEL", "whisper-large-v3-turbo")
+CHAT_REPLY_TOKENS = int(os.getenv("ARISA_CHAT_REPLY_TOKENS", "2048"))
+VOICE_REPLY_TOKENS = int(os.getenv("ARISA_VOICE_REPLY_TOKENS", "768"))
+VOICE_DETAIL_REPLY_TOKENS = int(os.getenv("ARISA_VOICE_DETAIL_REPLY_TOKENS", "2048"))
+MAX_RESPONSE_CONTINUATIONS = 3
 if WHISPER_MODEL == "whisper-large-v3":
     WHISPER_MODEL = "whisper-large-v3-turbo"
 MAX_VOICE_UPLOAD = 25 * 1024 * 1024
@@ -448,6 +453,31 @@ def clarify_ambiguous_desktop_target(message: str, app_ids: list[str]) -> Option
     return None
 
 
+def _continuation_messages(messages: list[dict], partial_reply: str) -> list[dict]:
+    """Ask the model to continue an answer stopped by a token limit or stream interruption."""
+    return [
+        *messages,
+        {"role": "assistant", "content": partial_reply},
+        {
+            "role": "user",
+            "content": (
+                "Continue the answer already in progress from the exact point where you stopped. "
+                "Do not repeat any earlier text. Finish the current thought and the requested answer "
+                "in the same natural voice and format."
+            ),
+        },
+    ]
+
+
+def _retryable_generation_error(exc: Exception) -> bool:
+    status_code = getattr(exc, "status_code", None)
+    if status_code is not None:
+        return status_code in {408, 409, 429} or status_code >= 500
+    return isinstance(exc, (TimeoutError, ConnectionError)) or exc.__class__.__name__ in {
+        "APIConnectionError", "APITimeoutError", "ConnectError", "ReadError", "RemoteProtocolError",
+    }
+
+
 def create_assistant_reply(
     client,
     *,
@@ -458,18 +488,33 @@ def create_assistant_reply(
     allow_desktop_actions: bool = False,
 ) -> tuple[str, bool]:
     """Generate a reply and, when safely requested, execute an allowlisted app tool."""
-    request = {
-        "model": model,
-        "messages": messages,
-        "temperature": temperature,
-        "max_tokens": max_tokens,
-    }
-    if allow_desktop_actions:
-        request["tools"] = [DESKTOP_TOOL]
-        request["tool_choice"] = "auto"
+    accumulated_reply = ""
+    current_messages = messages
+    assistant_message = None
+    for attempt in range(MAX_RESPONSE_CONTINUATIONS + 1):
+        request = {
+            "model": model,
+            "messages": current_messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        }
+        if allow_desktop_actions:
+            request["tools"] = [DESKTOP_TOOL]
+            request["tool_choice"] = "auto"
 
-    response = client.chat.completions.create(**request)
-    assistant_message = response.choices[0].message
+        response = client.chat.completions.create(**request)
+        choice = response.choices[0]
+        assistant_message = choice.message
+        content = assistant_message.content or ""
+        if content:
+            accumulated_reply += content
+        if getattr(assistant_message, "tool_calls", None) or getattr(choice, "finish_reason", None) != "length":
+            break
+        if attempt < MAX_RESPONSE_CONTINUATIONS and accumulated_reply:
+            current_messages = _continuation_messages(messages, accumulated_reply)
+
+    if assistant_message is None:
+        return "I wasn't able to form a response just now.", False
     tool_calls = getattr(assistant_message, "tool_calls", None) or []
     if tool_calls and allow_desktop_actions:
         requested_apps = []
@@ -499,7 +544,11 @@ def create_assistant_reply(
         results = [launch_desktop_app(app_id) for app_id in requested_apps]
         return " ".join(result for result in results if result), True
 
-    return assistant_message.content or "I wasn't able to form a response just now.", False
+    if getattr(choice, "finish_reason", None) == "length" and accumulated_reply:
+        accumulated_reply = accumulated_reply.rstrip() + (
+            "\n\nI reached the response limit before I could finish. Please ask me to continue."
+        )
+    return accumulated_reply.strip() or "I wasn't able to form a response just now.", False
 
 
 def voice_reply_requests_detail(user_text: str) -> bool:
@@ -514,6 +563,46 @@ def voice_reply_requests_detail(user_text: str) -> bool:
 
 def _voice_sse(event: str, payload: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+_VOICE_ABBREVIATIONS = {
+    "dr", "mr", "mrs", "ms", "prof", "sr", "jr", "st", "vs", "etc",
+    "e.g", "i.e", "u.s", "u.k", "a.m", "p.m",
+}
+
+
+def _find_voice_sentence_boundary(text: str, start: int = 0) -> Optional[int]:
+    """Find a spoken sentence boundary without splitting decimals or common abbreviations."""
+    for match in re.finditer(r"[.!?](?:[\"”’')\]]*)\s+", text[start:]):
+        end = start + match.end()
+        punctuation = text[start + match.start()]
+        if punctuation == ".":
+            prefix = text[:start + match.start() + 1]
+            token_match = re.search(r"([A-Za-z]+(?:\.[A-Za-z]+)*\.)$", prefix)
+            if token_match:
+                token = token_match.group(1).rstrip(".").casefold()
+                if token in _VOICE_ABBREVIATIONS or len(token) == 1:
+                    continue
+        return end
+    return None
+
+
+def _next_voice_speech_boundary(text: str, *, has_spoken: bool) -> Optional[int]:
+    """Keep the first spoken unit prompt, then group sentences to avoid a TTS request per period."""
+    first = _find_voice_sentence_boundary(text)
+    if first is not None:
+        if not has_spoken:
+            return first
+        second = _find_voice_sentence_boundary(text, first)
+        if second is not None:
+            return second
+        if len(text) <= 420:
+            return None
+        return first
+    if len(text) <= 420:
+        return None
+    boundary = text.rfind(" ", 260, 420)
+    return boundary if boundary > 0 else text.rfind(" ", 1, 420)
 
 
 def _execute_streamed_desktop_tools(tool_calls: dict, user_text: str) -> tuple[str, bool]:
@@ -551,7 +640,7 @@ async def _stream_voice_reply(
     desktop_mode: bool,
     max_tokens: int,
 ):
-    """Stream complete spoken sentences as soon as the model produces them."""
+    """Stream complete speech chunks and continue generations stopped by limits or interruptions."""
     yield _voice_sse("transcript", {"user_transcript": user_text, "conversation_id": conversation_id})
     spoken_parts = []
 
@@ -570,57 +659,93 @@ async def _stream_voice_reply(
             reply = action_result
             did_desktop_action = True
         else:
-            request = {
-                "model": model,
-                "messages": messages,
-                "temperature": 0.65,
-                "max_tokens": max_tokens,
-                "stream": True,
-            }
-            if desktop_mode:
-                request["tools"] = [DESKTOP_TOOL]
-                request["tool_choice"] = "auto"
-
-            completion = await client.chat.completions.create(**request)
             reply_parts = []
             sentence_buffer = ""
+            current_messages = messages
             tool_calls = {}
+            generation_warning = None
+            finish_reason = None
 
-            async for chunk in completion:
-                choices = getattr(chunk, "choices", None) or []
-                if not choices:
-                    continue
-                delta = choices[0].delta
-                content = getattr(delta, "content", None)
-                if content:
-                    reply_parts.append(content)
-                    sentence_buffer += content
-                    while True:
-                        match = re.search(r"[.!?](?:[\"”’')\]]*)\s+", sentence_buffer)
-                        if match:
-                            boundary = match.end()
-                        elif len(sentence_buffer) > 420:
-                            boundary = sentence_buffer.rfind(" ", 260, 420)
-                        else:
-                            break
-                        if boundary <= 0:
-                            break
-                        sentence_event = await emit_sentence(sentence_buffer[:boundary])
-                        if sentence_event:
-                            yield sentence_event
-                        sentence_buffer = sentence_buffer[boundary:].lstrip()
+            for attempt in range(MAX_RESPONSE_CONTINUATIONS + 1):
+                request = {
+                    "model": model,
+                    "messages": current_messages,
+                    "temperature": 0.65,
+                    "max_tokens": max_tokens,
+                    "stream": True,
+                }
+                if desktop_mode:
+                    request["tools"] = [DESKTOP_TOOL]
+                    request["tool_choice"] = "auto"
 
-                for tool_delta in getattr(delta, "tool_calls", None) or []:
-                    index = tool_delta.index
-                    call = tool_calls.setdefault(index, {"id": "", "type": "function", "function": {"name": "", "arguments": ""}})
-                    if tool_delta.id:
-                        call["id"] += tool_delta.id
-                    function_delta = getattr(tool_delta, "function", None)
-                    if function_delta:
-                        call["function"]["name"] += function_delta.name or ""
-                        call["function"]["arguments"] += function_delta.arguments or ""
+                tool_calls = {}
+                finish_reason = None
+                try:
+                    completion = await client.chat.completions.create(**request)
+                    async for chunk in completion:
+                        choices = getattr(chunk, "choices", None) or []
+                        if not choices:
+                            continue
+                        choice = choices[0]
+                        finish_reason = getattr(choice, "finish_reason", None) or finish_reason
+                        delta = choice.delta
+                        content = getattr(delta, "content", None)
+                        if content:
+                            reply_parts.append(content)
+                            sentence_buffer += content
+                            while True:
+                                boundary = _next_voice_speech_boundary(
+                                    sentence_buffer,
+                                    has_spoken=bool(spoken_parts),
+                                )
+                                if boundary is None or boundary <= 0:
+                                    break
+                                sentence_event = await emit_sentence(sentence_buffer[:boundary])
+                                if sentence_event:
+                                    yield sentence_event
+                                sentence_buffer = sentence_buffer[boundary:].lstrip()
 
-            if tool_calls:
+                        for tool_delta in getattr(delta, "tool_calls", None) or []:
+                            index = tool_delta.index
+                            call = tool_calls.setdefault(index, {"id": "", "type": "function", "function": {"name": "", "arguments": ""}})
+                            if tool_delta.id:
+                                call["id"] += tool_delta.id
+                            function_delta = getattr(tool_delta, "function", None)
+                            if function_delta:
+                                call["function"]["name"] += function_delta.name or ""
+                                call["function"]["arguments"] += function_delta.arguments or ""
+                except Exception as exc:
+                    if attempt < MAX_RESPONSE_CONTINUATIONS and _retryable_generation_error(exc):
+                        current_messages = (
+                            _continuation_messages(messages, "".join(reply_parts))
+                            if reply_parts else messages
+                        )
+                        await asyncio.sleep(0.15 * (attempt + 1))
+                        continue
+                    if spoken_parts:
+                        generation_warning = (
+                            "I’m sorry, the connection interrupted my answer. Please ask me to continue "
+                            "if you’d like the rest."
+                        )
+                        break
+                    raise exc
+
+                if tool_calls:
+                    break
+                if finish_reason == "length" or finish_reason is None:
+                    if attempt < MAX_RESPONSE_CONTINUATIONS:
+                        current_messages = _continuation_messages(messages, "".join(reply_parts))
+                        continue
+                    if spoken_parts:
+                        generation_warning = (
+                            "I’m sorry, I reached the response limit before I could finish. "
+                            "Please ask me to continue."
+                        )
+                        break
+                    raise RuntimeError("The AI response ended before it produced a complete answer.")
+                break
+
+            if tool_calls and finish_reason == "tool_calls":
                 tool_reply, did_desktop_action = _execute_streamed_desktop_tools(tool_calls, user_text)
                 if reply_parts:
                     reply = "".join(reply_parts).strip() + " " + tool_reply
@@ -631,10 +756,17 @@ async def _stream_voice_reply(
                     yield sentence_event
             else:
                 did_desktop_action = False
-                sentence_event = await emit_sentence(sentence_buffer)
-                if sentence_event:
-                    yield sentence_event
-                reply = "".join(reply_parts).strip() or "I wasn't able to form a response just now."
+                if generation_warning:
+                    # Only voice complete chunks when a retry limit is exhausted; never speak a cut-off tail.
+                    reply = " ".join(spoken_parts + [generation_warning]).strip()
+                    sentence_event = await emit_sentence(generation_warning)
+                    if sentence_event:
+                        yield sentence_event
+                else:
+                    sentence_event = await emit_sentence(sentence_buffer)
+                    if sentence_event:
+                        yield sentence_event
+                    reply = "".join(reply_parts).strip() or "I wasn't able to form a response just now."
                 if not spoken_parts:
                     sentence_event = await emit_sentence(reply)
                     if sentence_event:
@@ -674,7 +806,8 @@ ARISA_PERSONALITY = (
     "Sound like a thoughtful person having a real conversation: answer the point directly, use "
     "contractions and natural sentence rhythm, and match the user's level of warmth. Avoid canned "
     "openers, repeated summaries, excessive enthusiasm, and pet names unless they fit naturally. "
-    "Never announce a tone or describe feelings you do not have."
+    "Complete each thought in clear, grammatical prose before ending a response. Never announce a "
+    "tone or describe feelings you do not have."
 )
 
 
@@ -687,6 +820,7 @@ def voice_system_context(conn, user_message: str) -> str:
         "Your response will be spoken aloud. Keep casual replies concise. If the user asks you to "
         "explain, teach, compare, or walk through something, give a complete, useful explanation "
         "with as much detail as requested; complex explanations may take several short paragraphs. "
+        "Finish sentences and conclusions fully; do not stop mid-thought to be brief. "
         "Use natural spoken transitions, contractions, familiar words, and a relaxed conversational "
         "cadence. Respond to what the user actually said; do not "
         "repeat their question or add a scripted greeting. "
@@ -731,7 +865,7 @@ def chat(body: ChatRequest):
         raise HTTPException(503, "Groq is not configured. Add GROQ_API_KEY to backend/.env and restart the API.")
     try:
         from groq import Groq
-        client = Groq(api_key=api_key)
+        client = Groq(api_key=api_key, timeout=180.0)
         with db() as conn:
             conversation_id = body.conversation_id
             row = conn.execute("SELECT id FROM conversations WHERE id=?", (conversation_id,)).fetchone() if conversation_id else None
@@ -773,7 +907,7 @@ def chat(body: ChatRequest):
                     model=MODEL,
                     messages=messages,
                     temperature=0.6,
-                    max_tokens=1200,
+                    max_tokens=CHAT_REPLY_TOKENS,
                     allow_desktop_actions=body.desktop_mode,
                 )
             timestamp = now()
@@ -1112,10 +1246,10 @@ async def voice_chat(
     try:
         if stream_response:
             from groq import AsyncGroq
-            client = AsyncGroq(api_key=api_key)
+            client = AsyncGroq(api_key=api_key, timeout=180.0)
         else:
             from groq import Groq
-            client = Groq(api_key=api_key)
+            client = Groq(api_key=api_key, timeout=180.0)
 
         user_text = await _transcribe_upload(file, client, async_client=stream_response)
 
@@ -1174,7 +1308,7 @@ async def voice_chat(
                         conversation_id=conv_id,
                         action_result=action_result,
                         desktop_mode=desktop_mode,
-                        max_tokens=1200 if detail_requested else 128,
+                        max_tokens=VOICE_DETAIL_REPLY_TOKENS if detail_requested else VOICE_REPLY_TOKENS,
                     ),
                     media_type="text/event-stream",
                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
@@ -1189,7 +1323,7 @@ async def voice_chat(
                     model=VOICE_MODEL,
                     messages=msgs,
                     temperature=0.65,
-                    max_tokens=1200 if detail_requested else 128,
+                    max_tokens=VOICE_DETAIL_REPLY_TOKENS if detail_requested else VOICE_REPLY_TOKENS,
                     allow_desktop_actions=desktop_mode,
                 )
 
