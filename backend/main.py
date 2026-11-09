@@ -38,7 +38,7 @@ EDGE_TTS_PITCH     = os.getenv("EDGE_TTS_PITCH", "+0Hz")
 # Migrate the old defaults while preserving any custom voice and rate settings.
 if EDGE_TTS_VOICE == "en-US-JennyNeural":
     EDGE_TTS_VOICE = "en-US-AriaNeural"
-if EDGE_TTS_RATE == "+0%":
+if EDGE_TTS_RATE in {"+0%", "-5%"}:
     EDGE_TTS_RATE = "+5%"
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
 ELEVENLABS_VOICE   = os.getenv("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM")

@@ -3,7 +3,7 @@ import { MessageSquare, Mic, MicOff, Send, Volume2, X } from 'lucide-react'
 import ArisaCharacter, { inferArisaEmotion } from './ArisaCharacter'
 
 const API              = '/api'
-const SILENCE_MS       = 800  // Start the response sooner while allowing natural pauses
+const SILENCE_MS       = 700  // Start the response sooner while retaining a natural pause
 const SPEECH_START_MS  = 150  // Reject brief clicks while arming quickly
 const VAD_CALIBRATION_MS = 300 // Establish the room's noise level before adapting the voice gate
 const MAX_RECORD_MS    = 300000 // Safety limit for an unattended recording (5 minutes)
@@ -72,6 +72,7 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
   const [statusHint,      setStatusHint]      = useState('')
   const [textInput,       setTextInput]       = useState('')
   const [textBusy,        setTextBusy]        = useState(false)
+  const [apiStatus,       setApiStatus]       = useState('checking')
   const [arisaEmotion,    setArisaEmotion]    = useState('calm')
 
   // ── Refs (used inside callbacks to avoid stale closures) ─────────────────
@@ -85,6 +86,26 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
   const micAnalyserRef = useRef(null)
   const silenceRafRef  = useRef(null)
   const audioElRef     = useRef(null)
+
+  useEffect(() => {
+    let stopped = false
+    let retryTimer
+    const checkApi = async () => {
+      try {
+        const response = await fetch(`${API}/health`, { cache: 'no-store' })
+        if (!response.ok) throw new Error('API is not ready')
+        const health = await response.json()
+        if (!stopped) setApiStatus(health.groq_configured ? 'ready' : 'unconfigured')
+      } catch {
+        if (!stopped) {
+          setApiStatus('checking')
+          retryTimer = setTimeout(checkApi, 500)
+        }
+      }
+    }
+    checkApi()
+    return () => { stopped = true; clearTimeout(retryTimer) }
+  }, [])
 
   /** Sync state + matching ref together. */
   const setOrbState = s => { orbStateRef.current = s; setOrbStateUI(s) }
@@ -224,6 +245,12 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
   // ── Start listening ───────────────────────────────────────────────────────
   const startListening = useCallback(async () => {
     if (orbStateRef.current === 'listening') return
+    if (apiStatus !== 'ready') {
+      setError(apiStatus === 'unconfigured'
+        ? 'Add your Groq API key to finish setting up Arisa.'
+        : 'Arisa is still starting. Try again in a moment.')
+      return
+    }
     setError('')
     setStatusHint('Waiting for you to speak…')
 
@@ -359,7 +386,7 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
       setOrbState('idle')
       setStatusHint('')
     }
-  }, [processAudio, stopRecording])
+  }, [apiStatus, processAudio, stopRecording])
 
   useEffect(() => {
     if (!desktopMode || !window.arisaDesktop?.onWake) return
@@ -428,7 +455,7 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
     : orbState === 'speaking' ? speakerAnalyser : null
 
   const stateLabel = {
-    idle:      sessionOn ? 'Tap the orb to continue' : 'Tap the orb to speak',
+    idle:      apiStatus === 'checking' ? 'Starting Arisa…' : apiStatus === 'unconfigured' ? 'Add a Groq API key to start' : sessionOn ? 'Tap the orb to continue' : 'Tap the orb to speak',
     listening: 'Listening…',
     thinking:  'Thinking…',
     speaking:  'Speaking…',
@@ -461,6 +488,7 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
         <button
           className={`arisa-character-button character-button-${orbState}`}
           onClick={handleOrbClick}
+          disabled={orbState === 'idle' && apiStatus !== 'ready'}
           aria-label={stateLabel}
         >
           <ArisaCharacter state={orbState} emotion={arisaEmotion} analyser={activeAnalyser} />
@@ -503,8 +531,8 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
       {/* Action buttons */}
       <div className="voice-controls">
         {orbState === 'idle' && !sessionOn && (
-          <button className="voice-start-btn" onClick={startListening}>
-            <Mic size={18} /> Start Voice Session
+          <button className="voice-start-btn" onClick={startListening} disabled={apiStatus !== 'ready'}>
+            <Mic size={18} /> {apiStatus === 'checking' ? 'Starting Arisa…' : apiStatus === 'unconfigured' ? 'Add Groq API key' : 'Start Voice Session'}
           </button>
         )}
         {orbState === 'listening' && (
@@ -535,9 +563,10 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
 
       {desktopMode && <form className="voice-text-composer" onSubmit={e => { e.preventDefault(); sendText() }}>
         <textarea rows="1" value={textInput} onChange={e => setTextInput(e.target.value)}
+          disabled={apiStatus !== 'ready'}
           onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendText() } }}
           placeholder="Type to Arisa — replies are spoken aloud" aria-label="Message Arisa by text" />
-        <button type="submit" disabled={!textInput.trim() || textBusy} aria-label="Send message"><Send size={17}/></button>
+        <button type="submit" disabled={apiStatus !== 'ready' || !textInput.trim() || textBusy} aria-label="Send message"><Send size={17}/></button>
       </form>}
 
     </div>

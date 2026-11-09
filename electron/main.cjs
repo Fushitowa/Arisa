@@ -19,6 +19,7 @@ let listenerAttempts = 0
 let backend
 let vite
 let listenerEnabled = true
+let backendReady = false
 let quitting = false
 
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required')
@@ -49,7 +50,10 @@ async function waitFor(port, route, timeoutMs = 25000) {
 }
 
 async function startBackend() {
-  if (await requestOk(backendPort, '/api/health')) return
+  if (await requestOk(backendPort, '/api/health')) {
+    backendReady = true
+    return true
+  }
   const userData = app.getPath('userData')
   const envFile = dev ? path.join(backendDir, '.env') : path.join(userData, 'backend.env')
   const dbFile = dev ? path.join(backendDir, 'lizz.db') : path.join(userData, 'arisa.db')
@@ -62,14 +66,16 @@ async function startBackend() {
   })
   backend.on('error', () => tray?.displayBalloon({ title: 'Arisa AI', content: 'Could not start the API. Check Python and backend dependencies.' }))
   const ready = await waitFor(backendPort, '/api/health')
+  backendReady = ready
   if (!ready) tray?.displayBalloon({ title: 'Arisa AI', content: 'The API did not start. Check Python, backend/.env, and backend dependencies.' })
+  return ready
 }
 
 async function startVite() {
   if (vite) return
   if (!dev) {
     const dist = path.join(root, 'dist')
-    http.createServer((req, res) => {
+    const server = http.createServer((req, res) => {
       if (req.url.startsWith('/api/')) {
         const proxy = http.request({ hostname: '127.0.0.1', port: backendPort, path: req.url, method: req.method, headers: req.headers }, upstream => {
           res.writeHead(upstream.statusCode || 502, upstream.headers)
@@ -86,7 +92,11 @@ async function startVite() {
       const types = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.png': 'image/png', '.woff2': 'font/woff2' }
       res.writeHead(200, { 'Content-Type': types[path.extname(file)] || 'application/octet-stream' })
       fs.createReadStream(file).pipe(res)
-    }).listen(5173, '127.0.0.1')
+    })
+    await new Promise((resolve, reject) => {
+      server.once('error', reject)
+      server.listen(5173, '127.0.0.1', resolve)
+    })
     return
   }
   if (await requestOk(5173, '/')) return
@@ -94,10 +104,13 @@ async function startVite() {
   vite = spawn(command, ['run', 'dev', '--', '--host', '127.0.0.1'], {
     cwd: root, windowsHide: true, stdio: 'ignore', shell: process.platform === 'win32',
   })
+  if (!await waitFor(5173, '/', 10000)) {
+    tray?.displayBalloon({ title: 'Arisa AI', content: 'The interface did not start. Check the app installation.' })
+  }
 }
 
 function startWakeListener() {
-  if (!listenerEnabled || listener || windowRef?.isVisible()) return
+  if (!backendReady || !listenerEnabled || listener || windowRef?.isVisible()) return
   listenerAttempts += 1
   const script = path.join(backendDir, 'wake_listener.py')
   listener = spawn(pythonPath(), [script], {
@@ -209,9 +222,13 @@ app.whenReady().then(async () => {
   if (!hiddenAtLaunch) setStartup(true)
   refreshTrayMenu()
   await startVite()
-  await startBackend()
+  const backendStartup = startBackend()
   createWindow()
-  if (hiddenAtLaunch) startWakeListener()
+  backendStartup.then(() => {
+    if (hiddenAtLaunch || !windowRef?.isVisible()) startWakeListener()
+  }).catch(() => {
+    tray?.displayBalloon({ title: 'Arisa AI', content: 'The API could not start. Check Python and backend dependencies.' })
+  })
 })
 
 app.on('window-all-closed', event => event.preventDefault())
