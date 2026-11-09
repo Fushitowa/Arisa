@@ -74,8 +74,8 @@
 
 /* The character is the voice control and reacts to Arisa's current state. */
 .arisa-character-button {
-  width: 276px;
-  height: 294px;
+  width: 320px;
+  height: 300px;
   background: transparent;
   border: none;
   padding: 0;
@@ -104,20 +104,23 @@
   position: relative;
   z-index: 1;
   display: block;
-  width: auto;
-  height: 100%;
+  width: 100%;
+  height: auto;
   max-width: 100%;
+  max-height: 100%;
   object-fit: contain;
   user-select: none;
-  filter: drop-shadow(0 10px 22px rgba(0,0,0,.25));
+  -webkit-mask-image: linear-gradient(90deg, transparent, #000 8%, #000 92%, transparent);
+  mask-image: linear-gradient(90deg, transparent, #000 8%, #000 92%, transparent);
+  filter: drop-shadow(0 12px 26px rgba(167,130,255,.13)) drop-shadow(0 8px 18px rgba(0,0,0,.36));
 }
 .character-aura {
   position: absolute;
   z-index: -1;
-  width: 180px;
-  height: 180px;
+  width: 250px;
+  height: 220px;
   left: 50%;
-  top: 39%;
+  top: 48%;
   transform: translate(-50%,-50%);
   border-radius: 50%;
   background: radial-gradient(circle, var(--character-glow), transparent 70%);
@@ -146,12 +149,12 @@
   transition: transform 75ms linear;
   opacity: .55;
 }
-.expression-happy, .expression-smiling, .expression-laughing, .expression-excited { --character-glow: rgba(250,204,21,.28); }
-.expression-blushing, .expression-shy, .expression-cute, .expression-flirty { --character-glow: rgba(244,114,182,.28); }
-.expression-worried, .expression-sad, .expression-crying, .expression-depressed, .expression-lonely { --character-glow: rgba(96,165,250,.25); }
-.expression-surprised, .expression-shocked, .expression-stunned, .expression-scared { --character-glow: rgba(251,146,60,.28); }
-.expression-hopeful, .expression-friendly, .expression-focused { --character-glow: rgba(110,231,183,.27); }
-.expression-angry, .expression-mad, .expression-annoyed, .expression-frustrated, .expression-disgusted { --character-glow: rgba(248,113,113,.28); }
+.expression-happy, .expression-smiling, .expression-laughing, .expression-excited { --character-glow: rgba(250,204,21,.24); }
+.expression-blushing, .expression-shy, .expression-cute, .expression-embarrassed { --character-glow: rgba(244,114,182,.25); }
+.expression-concerned, .expression-crying, .expression-tired, .expression-sleepy { --character-glow: rgba(96,165,250,.22); }
+.expression-surprised, .expression-scared { --character-glow: rgba(251,146,60,.25); }
+.expression-neutral, .expression-thinking, .expression-serious, .expression-focused { --character-glow: rgba(167,130,255,.24); }
+.expression-angry, .expression-pouty { --character-glow: rgba(248,113,113,.25); }
 .character-voice-bars {
   position: absolute;
   z-index: 2;
@@ -323,7 +326,7 @@
 
 /* ── Responsive ── */
 @media(max-width:660px) {
-  .arisa-character-button { width: 238px; height: 254px; }
+  .arisa-character-button { width: min(280px, 88vw); height: 268px; }
   .voice-mode    { padding: 28px 14px 24px; gap: 22px; }
   .voice-title   { font-size: 23px; }
   .voice-header  { flex-direction: column; gap: 10px; }
