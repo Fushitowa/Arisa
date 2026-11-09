@@ -73,7 +73,7 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
   const [textInput,       setTextInput]       = useState('')
   const [textBusy,        setTextBusy]        = useState(false)
   const [apiStatus,       setApiStatus]       = useState('checking')
-  const [arisaEmotion,    setArisaEmotion]    = useState('calm')
+  const [arisaEmotion,    setArisaEmotion]    = useState('neutral')
 
   // ── Refs (used inside callbacks to avoid stale closures) ─────────────────
   const orbStateRef    = useRef('idle')
@@ -144,6 +144,7 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
 
   // ── TTS playback ──────────────────────────────────────────────────────────
   const playTTS = useCallback(async (text, immediate = false) => {
+    setArisaEmotion(inferArisaEmotion(text))
     const spokenText = removeToneLabel(text)
     if (!spokenText) return
     if (immediate) {

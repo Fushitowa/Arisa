@@ -1,7 +1,7 @@
 {
   "name": "arisa-ai",
   "private": true,
-  "version": "0.1.16",
+  "version": "0.1.17",
   "description": "A personal AI workspace with a Windows voice desktop app",
   "author": "Ken (Fushitowa)",
   "type": "module",
