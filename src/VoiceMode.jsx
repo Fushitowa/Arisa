@@ -3,7 +3,7 @@ import { MessageSquare, Mic, MicOff, Send, Volume2, X } from 'lucide-react'
 import ArisaCharacter, { inferArisaEmotion } from './ArisaCharacter'
 
 const API              = '/api'
-const SILENCE_MS       = 950  // Reply shortly after speech ends, without cutting off normal pauses
+const SILENCE_MS       = 800  // Start the response sooner while allowing natural pauses
 const SPEECH_START_MS  = 150  // Reject brief clicks while arming quickly
 const VAD_CALIBRATION_MS = 300 // Establish the room's noise level before adapting the voice gate
 const MAX_RECORD_MS    = 300000 // Safety limit for an unattended recording (5 minutes)
@@ -140,33 +140,12 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
       return
     }
     setStatusHint('Speaking…')
-    let objectUrl = null
     try {
-      let audio
-      if (desktopMode) {
-        // Let Chromium play the MP3 response as it streams from Edge TTS. The
-        // previous POST/blob flow waited for the entire reply audio first.
-        const streamUrl = `${API}/arisa/tts/stream?text=${encodeURIComponent(spokenText)}`
-        audio = new Audio(streamUrl)
-        audio.preload = 'auto'
-      } else {
-        const res = await fetch(`${API}/arisa/tts`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ text: spokenText }),
-        })
-        if (!res.ok) {
-          const body = await res.text()
-          let detail
-          try { detail = JSON.parse(body)?.detail } catch {}
-          throw new Error(detail || body?.slice(0, 180) || `Speech generation failed (HTTP ${res.status}).`)
-        }
-
-        const blob = await res.blob()
-        if (!blob.size) throw new Error('The speech API returned an empty audio file.')
-        objectUrl = URL.createObjectURL(blob)
-        audio = new Audio(objectUrl)
-      }
+      // Play progressive audio chunks in both web and desktop voice mode so
+      // playback can begin before the entire response has been synthesized.
+      const streamUrl = `${API}/arisa/tts/stream?text=${encodeURIComponent(spokenText)}`
+      const audio = new Audio(streamUrl)
+      audio.preload = 'auto'
       audioElRef.current = audio
 
       // Wire up Web Audio for the speaking visualiser
@@ -196,7 +175,6 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
         setError(`Arisa could not speak. ${e.message || 'TTS API failed.'} ${fallbackError.message || ''}`.trim())
       }
     } finally {
-      if (objectUrl) URL.revokeObjectURL(objectUrl)
       audioElRef.current = null
       setSpeakerAnalyser(null)
       setStatusHint('')
@@ -206,12 +184,12 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
       audioCtxRef.current = null
       // Auto-loop: jump straight back into listening if the session is still on
       if (sessionRef.current) {
-        setTimeout(() => startListening(), 400)
+        setTimeout(() => startListening(), 250)
       } else {
         setOrbState('idle')
       }
     }
-  }, [desktopMode])  // startListening referenced via closure below — hoisted after definition
+  }, [])  // startListening referenced via closure below — hoisted after definition
 
   // ── Process audio blob → backend ──────────────────────────────────────────
   const processAudio = useCallback(async blob => {

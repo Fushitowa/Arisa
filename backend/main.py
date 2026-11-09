@@ -22,6 +22,7 @@ load_dotenv(os.getenv("ARISA_ENV_FILE", str(Path(__file__).parent / ".env")))
 DB_PATH = Path(os.getenv("DATABASE_PATH", str(Path(__file__).parent / "lizz.db")))
 MAX_UPLOAD = int(os.getenv("MAX_UPLOAD_MB", "10")) * 1024 * 1024
 MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
+VOICE_MODEL = os.getenv("GROQ_VOICE_MODEL", "openai/gpt-oss-20b")
 WHISPER_MODEL = os.getenv("GROQ_WHISPER_MODEL", "whisper-large-v3")
 MAX_VOICE_UPLOAD = 25 * 1024 * 1024
 # Older setup guides used Llama 3.3, which Groq deprecated in August 2026.
@@ -31,9 +32,14 @@ ALLOWED = {".pdf", ".txt", ".md"}
 
 # ── Voice / TTS ──────────────────────────────────────────────────────────────
 TTS_PROVIDER       = os.getenv("TTS_PROVIDER", "edge")            # "edge" | "elevenlabs"
-EDGE_TTS_VOICE     = os.getenv("EDGE_TTS_VOICE", "en-US-JennyNeural")
-EDGE_TTS_RATE      = os.getenv("EDGE_TTS_RATE", "+0%")
+EDGE_TTS_VOICE     = os.getenv("EDGE_TTS_VOICE", "en-US-AriaNeural")
+EDGE_TTS_RATE      = os.getenv("EDGE_TTS_RATE", "+5%")
 EDGE_TTS_PITCH     = os.getenv("EDGE_TTS_PITCH", "+0Hz")
+# Migrate the old defaults while preserving any custom voice and rate settings.
+if EDGE_TTS_VOICE == "en-US-JennyNeural":
+    EDGE_TTS_VOICE = "en-US-AriaNeural"
+if EDGE_TTS_RATE == "+0%":
+    EDGE_TTS_RATE = "+5%"
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
 ELEVENLABS_VOICE   = os.getenv("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM")
 ELEVENLABS_MODEL   = os.getenv("ELEVENLABS_MODEL_ID", "eleven_flash_v2_5")
@@ -347,9 +353,10 @@ ARISA_PERSONALITY = (
     "the conversation; do not nag or derail unrelated questions. Suggest breaks, water, or stretching "
     "when the conversation gives a reason, but never claim to observe his screen, schedule, health, "
     "or activity. Do not invent goals, progress, personal details, or feelings.\n\n"
-    "Begin every reply with exactly one short bracketed tone label chosen from: [Tone: Loving & Affectionate], "
-    "[Tone: Gentle Encouragement], [Tone: Playful], [Tone: Concerned & Caring], [Tone: Excited], "
-    "or [Tone: Calm & Thoughtful]. Choose the label that best matches the response, then answer naturally."
+    "Sound like a thoughtful person having a real conversation: answer the point directly, use "
+    "contractions and natural sentence rhythm, and match the user's level of warmth. Avoid canned "
+    "openers, repeated summaries, excessive enthusiasm, and pet names unless they fit naturally. "
+    "Never announce a tone or describe feelings you do not have."
 )
 
 
@@ -357,8 +364,10 @@ def voice_system_context(conn, user_message: str) -> str:
     return (
         ARISA_PERSONALITY
         + "\n\nYou are responding in voice mode. "
-        "Your responses will be spoken aloud, so answer promptly with one or two natural, "
-        "concise sentences (aim for under 35 words) unless the user asks for detail. "
+        "Your response will be spoken aloud. Answer promptly in one or two natural sentences, "
+        "usually under 30 words, unless the user asks for detail. Use contractions, familiar words, "
+        "and a relaxed conversational cadence. Respond to what the user actually said; do not "
+        "repeat their question or add a scripted greeting. "
         "Never use markdown, bullet points, code blocks, or formatting that sounds "
         "awkward when read aloud.\n"
         + MEMORY_TRUTH_RULE
@@ -381,6 +390,7 @@ def health():
         "status": "ok",
         "groq_configured": bool(os.getenv("GROQ_API_KEY")),
         "model": MODEL,
+        "voice_model": VOICE_MODEL,
         "tts_provider": TTS_PROVIDER,
         "tts_voice": EDGE_TTS_VOICE if TTS_PROVIDER == "edge" else ELEVENLABS_VOICE,
     }
@@ -431,7 +441,7 @@ def chat(body: ChatRequest):
             messages.extend({"role": r["role"], "content": r["content"]} for r in prior[-24:])
             messages.append({"role": "user", "content": body.message})
             if action_result:
-                reply = "[Tone: Calm & Thoughtful] " + action_result
+                reply = action_result
             else:
                 result = client.chat.completions.create(model=MODEL, messages=messages, temperature=0.6, max_tokens=1200)
                 reply = result.choices[0].message.content or "I wasn't able to form a response just now."
@@ -647,11 +657,11 @@ async def _elevenlabs_audio(text: str) -> bytes:
         "text": text,
         "model_id": ELEVENLABS_MODEL,
         "voice_settings": {
-            "stability": 0.48,
-            "similarity_boost": 0.82,
+            "stability": 0.42,
+            "similarity_boost": 0.80,
             "style": 0.0,
-            "use_speaker_boost": True,
-            "speed": 1.0,
+            "use_speaker_boost": False,
+            "speed": 1.03,
         },
     }
     async with httpx.AsyncClient(timeout=60.0) as client:
@@ -678,11 +688,11 @@ async def _elevenlabs_audio_stream(text: str):
         "text": text,
         "model_id": ELEVENLABS_MODEL,
         "voice_settings": {
-            "stability": 0.48,
-            "similarity_boost": 0.82,
+            "stability": 0.42,
+            "similarity_boost": 0.80,
             "style": 0.0,
-            "use_speaker_boost": True,
-            "speed": 1.0,
+            "use_speaker_boost": False,
+            "speed": 1.03,
         },
     }
     client = httpx.AsyncClient(timeout=httpx.Timeout(60.0, connect=10.0))
@@ -811,10 +821,10 @@ async def voice_chat(
             msgs.append({"role": "user", "content": user_text})
 
             if action_result:
-                reply = "[Tone: Calm & Thoughtful] " + action_result
+                reply = action_result
             else:
                 result = client.chat.completions.create(
-                    model=MODEL, messages=msgs, temperature=0.5, max_tokens=220
+                    model=VOICE_MODEL, messages=msgs, temperature=0.65, max_tokens=160
                 )
                 reply = result.choices[0].message.content or "I wasn't able to form a response."
 
