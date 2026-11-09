@@ -98,6 +98,7 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
   const recorderRef    = useRef(null)
   const chunksRef      = useRef([])
   const speechPlaybackRef = useRef(null)
+  const streamedReplyCancelRef = useRef(null)
   const startListeningRef = useRef(null)
   const pendingListenRef = useRef(false)
   const streamRef      = useRef(null)
@@ -131,6 +132,10 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
   const setSession  = v => { sessionRef.current  = v; setSessionOn(v)  }
 
   const cancelSpeechPlayback = () => {
+    const cancelStreamedReply = streamedReplyCancelRef.current
+    streamedReplyCancelRef.current = null
+    cancelStreamedReply?.()
+
     const playback = speechPlaybackRef.current
     speechPlaybackRef.current = null
     playback?.cancel?.()
@@ -178,7 +183,7 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
   }, [])
 
   // ── TTS playback ──────────────────────────────────────────────────────────
-  const playTTS = useCallback(async (text, immediate = false) => {
+  const playTTS = useCallback(async (text, immediate = false, { streamChunk = false } = {}) => {
     setArisaEmotion(inferArisaEmotion(text))
     const spokenText = removeToneLabel(text)
     if (!spokenText) return
@@ -261,17 +266,19 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
       if (speechPlaybackRef.current === playback) speechPlaybackRef.current = null
       if (audioElRef.current === audio) audioElRef.current = null
       setSpeakerAnalyser(null)
-      setStatusHint('')
       if (audioCtxRef.current?.state !== 'closed') {
         try { await audioCtxRef.current.close() } catch {}
       }
       audioCtxRef.current = null
-      // Auto-loop: jump straight back into listening if the session is still on
-      if (sessionRef.current && !playback.cancelled) {
-        setOrbState('idle')
-        setTimeout(() => { if (sessionRef.current) startListeningRef.current?.() }, 250)
-      } else {
-        setOrbState('idle')
+      if (!streamChunk) {
+        setStatusHint('')
+        // Auto-loop: jump straight back into listening if the session is still on
+        if (sessionRef.current && !playback.cancelled) {
+          setOrbState('idle')
+          setTimeout(() => { if (sessionRef.current) startListeningRef.current?.() }, 250)
+        } else {
+          setOrbState('idle')
+        }
       }
     }
   }, [])
@@ -281,28 +288,125 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
     if (blob.size < MIN_BLOB_BYTES) { setOrbState('idle'); return }
     setOrbState('thinking')
     setMicAnalyser(null)
+    setReply('')
     setError('')
-    setStatusHint('Processing…')
+    setStatusHint('Transcribing…')
+
+    const controller = new AbortController()
+    const speechQueue = []
+    let speechDraining = false
+    let responseFinished = false
+    let cancelled = false
+    let partialReply = ''
+    let receivedSentence = false
+    let resolveSpeechComplete
+    const speechComplete = new Promise(resolve => { resolveSpeechComplete = resolve })
+
+    const finishResponse = () => {
+      if (cancelled || !responseFinished || speechDraining || speechQueue.length) return
+      if (streamedReplyCancelRef.current === cancelStreamedResponse) streamedReplyCancelRef.current = null
+      setSpeakerAnalyser(null)
+      setStatusHint('')
+      setOrbState('idle')
+      if (sessionRef.current) {
+        setTimeout(() => { if (sessionRef.current) startListeningRef.current?.() }, 180)
+      }
+      resolveSpeechComplete()
+    }
+
+    const cancelStreamedResponse = () => {
+      if (cancelled) return
+      cancelled = true
+      responseFinished = true
+      speechQueue.length = 0
+      controller.abort()
+      resolveSpeechComplete()
+    }
+    streamedReplyCancelRef.current = cancelStreamedResponse
+
+    const drainSpeechQueue = async () => {
+      if (speechDraining) return
+      speechDraining = true
+      while (speechQueue.length && !cancelled) {
+        await playTTS(speechQueue.shift(), false, { streamChunk: true })
+      }
+      speechDraining = false
+      finishResponse()
+    }
+
+    const handleEvent = frame => {
+      const lines = frame.split('\n')
+      const event = lines.find(line => line.startsWith('event:'))?.slice(6).trim()
+      const data = lines.filter(line => line.startsWith('data:')).map(line => line.slice(5).trimStart()).join('\n')
+      if (!event || !data) return
+      const payload = JSON.parse(data)
+
+      if (event === 'transcript') {
+        setTranscript(payload.user_transcript || '')
+        convIdRef.current = payload.conversation_id || convIdRef.current
+        setStatusHint('Thinking…')
+      } else if (event === 'sentence') {
+        const sentence = String(payload.text || '').trim()
+        if (!sentence) return
+        receivedSentence = true
+        partialReply = partialReply ? `${partialReply} ${sentence}` : sentence
+        setReply(partialReply)
+        setArisaEmotion(inferArisaEmotion(partialReply))
+        speechQueue.push(sentence)
+        void drainSpeechQueue()
+      } else if (event === 'done') {
+        responseFinished = true
+        const finalReply = payload.reply || partialReply
+        setReply(finalReply)
+        setArisaEmotion(inferArisaEmotion(finalReply))
+        if (!receivedSentence && finalReply) {
+          speechQueue.push(finalReply)
+          void drainSpeechQueue()
+        }
+        finishResponse()
+      } else if (event === 'error') {
+        throw new Error(payload.detail || 'Voice request failed.')
+      }
+    }
 
     try {
       const fd = new FormData()
       fd.append('file', blob, 'voice.webm')
       if (convIdRef.current) fd.append('conversation_id', convIdRef.current)
       fd.append('desktop_mode', String(desktopMode))
+      fd.append('stream_response', 'true')
 
-      const res = await fetch(`${API}/arisa/voice`, { method: 'POST', body: fd })
-      const data = await readApiResult(res, 'Voice API request')
-      setTranscript(data.user_transcript || '')
-      setReply(data.arisa_reply || '')
-      convIdRef.current = data.conversation_id
-      setArisaEmotion(inferArisaEmotion(data.arisa_reply || ''))
-      await playTTS(data.arisa_reply || '', data.desktop_action === true)
+      const res = await fetch(`${API}/arisa/voice`, { method: 'POST', body: fd, signal: controller.signal })
+      if (!res.ok) throw new Error((await readApiResult(res, 'Voice API request')).detail || 'Voice API request failed.')
+      if (!res.body) throw new Error('The voice API did not open a response stream.')
+
+      const reader = res.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+      while (true) {
+        const { value, done } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, '\n')
+        let boundary
+        while ((boundary = buffer.indexOf('\n\n')) >= 0) {
+          handleEvent(buffer.slice(0, boundary))
+          buffer = buffer.slice(boundary + 2)
+        }
+      }
+      buffer += decoder.decode()
+      if (buffer.trim()) handleEvent(buffer)
+      if (!responseFinished && !cancelled) throw new Error('Arisa’s response stream ended unexpectedly.')
+      await speechComplete
     } catch (e) {
-      setError(e.message === 'Failed to fetch'
-        ? 'Could not reach the voice API. Make sure Arisa’s backend is running, then try again.'
-        : e.message || 'Voice request failed.')
-      setOrbState('idle')
-      setStatusHint('')
+      if (!cancelled) {
+        cancelSpeechPlayback()
+        setError(e.message === 'Failed to fetch'
+          ? 'Could not reach the voice API. Make sure Arisa’s backend is running, then try again.'
+          : e.message || 'Voice request failed.')
+        setSpeakerAnalyser(null)
+        setOrbState('idle')
+        setStatusHint('')
+      }
     }
   }, [desktopMode, playTTS])
 

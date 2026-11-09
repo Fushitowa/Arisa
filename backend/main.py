@@ -502,6 +502,165 @@ def create_assistant_reply(
     return assistant_message.content or "I wasn't able to form a response just now.", False
 
 
+def voice_reply_requests_detail(user_text: str) -> bool:
+    return bool(re.search(
+        r"\b(explain|explanation|detailed|comprehensive|walk me through|step by step|in detail|more detail|"
+        r"in depth|elaborate|teach me|break it down|describe|tell me about|give me an overview|"
+        r"how does .+ work|why does .+ work)\b",
+        user_text,
+        re.IGNORECASE,
+    ))
+
+
+def _voice_sse(event: str, payload: dict) -> str:
+    return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+def _execute_streamed_desktop_tools(tool_calls: dict, user_text: str) -> tuple[str, bool]:
+    requested_apps = []
+    for call in tool_calls.values():
+        function = call.get("function", {})
+        if function.get("name") != "launch_desktop_application":
+            return "Which supported application would you like me to open?", False
+        try:
+            arguments = json.loads(function.get("arguments", "{}"))
+        except (TypeError, ValueError):
+            return "Which supported application would you like me to open?", False
+        app_id = arguments.get("app_id") if isinstance(arguments, dict) else None
+        if app_id not in DESKTOP_APPS:
+            return "Which supported application would you like me to open?", False
+        if app_id not in requested_apps:
+            requested_apps.append(app_id)
+
+    if not requested_apps or len(requested_apps) > 3:
+        return "Please tell me which one supported application you want opened first.", False
+    clarification = clarify_ambiguous_desktop_target(user_text, requested_apps)
+    if clarification:
+        return clarification, False
+    return " ".join(launch_desktop_app(app_id) for app_id in requested_apps), True
+
+
+async def _stream_voice_reply(
+    client,
+    *,
+    model: str,
+    messages: list[dict],
+    user_text: str,
+    conversation_id: str,
+    action_result: Optional[str],
+    desktop_mode: bool,
+    max_tokens: int,
+):
+    """Stream complete spoken sentences as soon as the model produces them."""
+    yield _voice_sse("transcript", {"user_transcript": user_text, "conversation_id": conversation_id})
+    spoken_parts = []
+
+    async def emit_sentence(text: str):
+        text = text.strip()
+        if text:
+            spoken_parts.append(text)
+            return _voice_sse("sentence", {"text": text})
+        return None
+
+    try:
+        if action_result:
+            sentence_event = await emit_sentence(action_result)
+            if sentence_event:
+                yield sentence_event
+            reply = action_result
+            did_desktop_action = True
+        else:
+            request = {
+                "model": model,
+                "messages": messages,
+                "temperature": 0.65,
+                "max_tokens": max_tokens,
+                "stream": True,
+            }
+            if desktop_mode:
+                request["tools"] = [DESKTOP_TOOL]
+                request["tool_choice"] = "auto"
+
+            completion = await client.chat.completions.create(**request)
+            reply_parts = []
+            sentence_buffer = ""
+            tool_calls = {}
+
+            async for chunk in completion:
+                choices = getattr(chunk, "choices", None) or []
+                if not choices:
+                    continue
+                delta = choices[0].delta
+                content = getattr(delta, "content", None)
+                if content:
+                    reply_parts.append(content)
+                    sentence_buffer += content
+                    while True:
+                        match = re.search(r"[.!?](?:[\"”’')\]]*)\s+", sentence_buffer)
+                        if match:
+                            boundary = match.end()
+                        elif len(sentence_buffer) > 420:
+                            boundary = sentence_buffer.rfind(" ", 260, 420)
+                        else:
+                            break
+                        if boundary <= 0:
+                            break
+                        sentence_event = await emit_sentence(sentence_buffer[:boundary])
+                        if sentence_event:
+                            yield sentence_event
+                        sentence_buffer = sentence_buffer[boundary:].lstrip()
+
+                for tool_delta in getattr(delta, "tool_calls", None) or []:
+                    index = tool_delta.index
+                    call = tool_calls.setdefault(index, {"id": "", "type": "function", "function": {"name": "", "arguments": ""}})
+                    if tool_delta.id:
+                        call["id"] += tool_delta.id
+                    function_delta = getattr(tool_delta, "function", None)
+                    if function_delta:
+                        call["function"]["name"] += function_delta.name or ""
+                        call["function"]["arguments"] += function_delta.arguments or ""
+
+            if tool_calls:
+                tool_reply, did_desktop_action = _execute_streamed_desktop_tools(tool_calls, user_text)
+                if reply_parts:
+                    reply = "".join(reply_parts).strip() + " " + tool_reply
+                else:
+                    reply = tool_reply
+                sentence_event = await emit_sentence(tool_reply)
+                if sentence_event:
+                    yield sentence_event
+            else:
+                did_desktop_action = False
+                sentence_event = await emit_sentence(sentence_buffer)
+                if sentence_event:
+                    yield sentence_event
+                reply = "".join(reply_parts).strip() or "I wasn't able to form a response just now."
+                if not spoken_parts:
+                    sentence_event = await emit_sentence(reply)
+                    if sentence_event:
+                        yield sentence_event
+
+        timestamp = now()
+        with db() as conn:
+            conn.execute(
+                "INSERT INTO messages VALUES(?,?,?,?,?)",
+                (str(uuid.uuid4()), conversation_id, "user", user_text, timestamp),
+            )
+            conn.execute(
+                "INSERT INTO messages VALUES(?,?,?,?,?)",
+                (str(uuid.uuid4()), conversation_id, "assistant", reply, timestamp),
+            )
+            conn.execute("UPDATE conversations SET updated_at=? WHERE id=?", (timestamp, conversation_id))
+        yield _voice_sse("done", {"reply": reply, "desktop_action": did_desktop_action})
+    except Exception as exc:
+        yield _voice_sse("error", {"detail": f"Voice processing failed: {str(exc)[:240]}"})
+    finally:
+        try:
+            await client.close()
+        except Exception:
+            pass
+
+
 ARISA_PERSONALITY = (
     "You are Arisa, Ken's personal virtual AI companion. Ken has asked you to use an affectionate, "
     "loving, caring, supportive partner-like tone and to treat him as your boyfriend in this "
@@ -525,9 +684,11 @@ def voice_system_context(conn, user_message: str) -> str:
         + "\n\n"
         + live_philippine_clock_context()
         + "\n\nYou are responding in voice mode. "
-        "Your response will be spoken aloud. Answer promptly in one or two natural sentences, "
-        "usually under 30 words, unless the user asks for detail. Use contractions, familiar words, "
-        "and a relaxed conversational cadence. Respond to what the user actually said; do not "
+        "Your response will be spoken aloud. Keep casual replies concise. If the user asks you to "
+        "explain, teach, compare, or walk through something, give a complete, useful explanation "
+        "with as much detail as requested; complex explanations may take several short paragraphs. "
+        "Use natural spoken transitions, contractions, familiar words, and a relaxed conversational "
+        "cadence. Respond to what the user actually said; do not "
         "repeat their question or add a scripted greeting. "
         "Never use markdown, bullet points, code blocks, or formatting that sounds "
         "awkward when read aloud.\n"
@@ -904,7 +1065,7 @@ async def _elevenlabs_audio_stream(text: str):
 
 # ── /api/arisa/voice — transcribe + LLM response ─────────────────────────────
 
-async def _transcribe_upload(file: UploadFile, client) -> str:
+async def _transcribe_upload(file: UploadFile, client, *, async_client: bool = False) -> str:
     audio_bytes = await file.read(MAX_VOICE_UPLOAD + 1)
     if not audio_bytes:
         raise HTTPException(400, "Empty audio received.")
@@ -923,12 +1084,13 @@ async def _transcribe_upload(file: UploadFile, client) -> str:
     ext = ext_map.get(content_type)
     if not ext:
         raise HTTPException(415, f"Unsupported voice audio format: {content_type or 'unknown'}.")
-    raw_transcription = client.audio.transcriptions.create(
+    transcription = client.audio.transcriptions.create(
         model=WHISPER_MODEL,
         file=(f"voice{ext}", audio_bytes, content_type),
         response_format="text",
         prompt="The speaker is talking to Arisa AI. Names may include Arisa and Ken.",
     )
+    raw_transcription = await transcription if async_client else transcription
     return (raw_transcription if isinstance(raw_transcription, str) else raw_transcription.text).strip()
 
 
@@ -937,6 +1099,7 @@ async def voice_chat(
     file: UploadFile = File(...),
     conversation_id: Optional[str] = Form(None),
     desktop_mode: bool = Form(False),
+    stream_response: bool = Form(False),
 ):
     """
     Transcribe a voice turn, generate a concise voice-optimised response, persist it, and return the
@@ -947,10 +1110,14 @@ async def voice_chat(
         raise HTTPException(503, "Groq is not configured. Add GROQ_API_KEY to backend/.env.")
 
     try:
-        from groq import Groq
-        client = Groq(api_key=api_key)
+        if stream_response:
+            from groq import AsyncGroq
+            client = AsyncGroq(api_key=api_key)
+        else:
+            from groq import Groq
+            client = Groq(api_key=api_key)
 
-        user_text = await _transcribe_upload(file, client)
+        user_text = await _transcribe_upload(file, client, async_client=stream_response)
 
         if not user_text:
             raise HTTPException(400, "No speech detected — please speak clearly and try again.")
@@ -990,10 +1157,28 @@ async def voice_chat(
                 sys_ctx += "\n\nThe user explicitly asked you to remember a detail in this message; it has now been saved. Acknowledge that briefly."
 
             msgs = [{"role": "system", "content": sys_ctx}]
+            detail_requested = voice_reply_requests_detail(user_text)
+            history_limit = 16 if detail_requested else 8
             msgs.extend(
-                {"role": r["role"], "content": r["content"]} for r in prior[-8:]
+                {"role": r["role"], "content": r["content"]} for r in prior[-history_limit:]
             )
             msgs.append({"role": "user", "content": user_text})
+
+            if stream_response:
+                return StreamingResponse(
+                    _stream_voice_reply(
+                        client,
+                        model=VOICE_MODEL,
+                        messages=msgs,
+                        user_text=user_text,
+                        conversation_id=conv_id,
+                        action_result=action_result,
+                        desktop_mode=desktop_mode,
+                        max_tokens=1200 if detail_requested else 128,
+                    ),
+                    media_type="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+                )
 
             if action_result:
                 reply = action_result
@@ -1004,7 +1189,7 @@ async def voice_chat(
                     model=VOICE_MODEL,
                     messages=msgs,
                     temperature=0.65,
-                    max_tokens=96,
+                    max_tokens=1200 if detail_requested else 128,
                     allow_desktop_actions=desktop_mode,
                 )
 
