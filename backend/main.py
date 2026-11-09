@@ -9,7 +9,7 @@ import time
 import uuid
 import webbrowser
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -97,6 +97,21 @@ app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:5173", "http
 
 def now():
     return datetime.now(timezone.utc).isoformat()
+
+
+PHILIPPINE_TIMEZONE = timezone(timedelta(hours=8), name="PHT")
+
+
+def live_philippine_clock_context() -> str:
+    """Return the current Philippine local date and time for this AI turn."""
+    current = datetime.now(PHILIPPINE_TIMEZONE)
+    date = f"{current:%A, %B} {current.day}, {current.year}"
+    time = current.strftime("%I:%M %p")
+    return (
+        f"Live Philippine clock: {date}, {time} PHT (UTC+08:00). "
+        "For questions about the current date or time, use this clock value; "
+        "do not guess from message timestamps or older conversation context."
+    )
 
 
 @contextmanager
@@ -507,6 +522,8 @@ ARISA_PERSONALITY = (
 def voice_system_context(conn, user_message: str) -> str:
     return (
         ARISA_PERSONALITY
+        + "\n\n"
+        + live_philippine_clock_context()
         + "\n\nYou are responding in voice mode. "
         "Your response will be spoken aloud. Answer promptly in one or two natural sentences, "
         "usually under 30 words, unless the user asks for detail. Use contractions, familiar words, "
@@ -565,6 +582,8 @@ def chat(body: ChatRequest):
             docs = conn.execute("SELECT filename,content FROM documents ORDER BY created_at DESC LIMIT 8").fetchall()
             context = (
                 ARISA_PERSONALITY
+                + "\n\n"
+                + live_philippine_clock_context()
                 + "\n\n"
                 + MEMORY_TRUTH_RULE
                 + "\n\n"
