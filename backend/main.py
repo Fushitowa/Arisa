@@ -13,7 +13,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-import pymupdf
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -25,7 +24,9 @@ DB_PATH = Path(os.getenv("DATABASE_PATH", str(Path(__file__).parent / "lizz.db")
 MAX_UPLOAD = int(os.getenv("MAX_UPLOAD_MB", "10")) * 1024 * 1024
 MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
 VOICE_MODEL = os.getenv("GROQ_VOICE_MODEL", "openai/gpt-oss-20b")
-WHISPER_MODEL = os.getenv("GROQ_WHISPER_MODEL", "whisper-large-v3")
+WHISPER_MODEL = os.getenv("GROQ_WHISPER_MODEL", "whisper-large-v3-turbo")
+if WHISPER_MODEL == "whisper-large-v3":
+    WHISPER_MODEL = "whisper-large-v3-turbo"
 MAX_VOICE_UPLOAD = 25 * 1024 * 1024
 # Older setup guides used Llama 3.3, which Groq deprecated in August 2026.
 if MODEL in {"llama-3.3-70b-versatile", "llama-3.1-8b-instant"}:
@@ -76,14 +77,16 @@ _desktop_launch_lock = threading.Lock()
 
 # ── Voice / TTS ──────────────────────────────────────────────────────────────
 TTS_PROVIDER       = os.getenv("TTS_PROVIDER", "edge")            # "edge" | "elevenlabs"
-EDGE_TTS_VOICE     = os.getenv("EDGE_TTS_VOICE", "en-US-AriaNeural")
-EDGE_TTS_RATE      = os.getenv("EDGE_TTS_RATE", "+5%")
-EDGE_TTS_PITCH     = os.getenv("EDGE_TTS_PITCH", "+0Hz")
-# Migrate the old defaults while preserving any custom voice and rate settings.
-if EDGE_TTS_VOICE == "en-US-JennyNeural":
-    EDGE_TTS_VOICE = "en-US-AriaNeural"
-if EDGE_TTS_RATE in {"+0%", "-5%"}:
-    EDGE_TTS_RATE = "+5%"
+EDGE_TTS_VOICE     = os.getenv("EDGE_TTS_VOICE", "en-US-MichelleNeural")
+EDGE_TTS_RATE      = os.getenv("EDGE_TTS_RATE", "-2%")
+EDGE_TTS_PITCH     = os.getenv("EDGE_TTS_PITCH", "-2Hz")
+# Move shipped defaults to a steadier voice while preserving custom profiles.
+if EDGE_TTS_VOICE in {"en-US-AriaNeural", "en-US-JennyNeural"}:
+    EDGE_TTS_VOICE = "en-US-MichelleNeural"
+if EDGE_TTS_RATE in {"+5%", "+0%", "-5%"}:
+    EDGE_TTS_RATE = "-2%"
+if EDGE_TTS_PITCH == "+0Hz":
+    EDGE_TTS_PITCH = "-2Hz"
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
 ELEVENLABS_VOICE   = os.getenv("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM")
 ELEVENLABS_MODEL   = os.getenv("ELEVENLABS_MODEL_ID", "eleven_flash_v2_5")
@@ -730,6 +733,7 @@ async def upload_document(file: UploadFile = File(...)):
         raise HTTPException(413, f"Files must be {MAX_UPLOAD // (1024 * 1024)} MB or smaller.")
     try:
         if ext == ".pdf":
+            import pymupdf
             with pymupdf.open(stream=raw, filetype="pdf") as pdf:
                 content = "\n".join(page.get_text() for page in pdf)
         else:
@@ -809,11 +813,11 @@ async def _elevenlabs_audio(text: str) -> bytes:
         "text": text,
         "model_id": ELEVENLABS_MODEL,
         "voice_settings": {
-            "stability": 0.42,
+            "stability": 0.58,
             "similarity_boost": 0.80,
             "style": 0.0,
             "use_speaker_boost": False,
-            "speed": 1.03,
+            "speed": 0.97,
         },
     }
     async with httpx.AsyncClient(timeout=60.0) as client:
@@ -840,11 +844,11 @@ async def _elevenlabs_audio_stream(text: str):
         "text": text,
         "model_id": ELEVENLABS_MODEL,
         "voice_settings": {
-            "stability": 0.42,
+            "stability": 0.58,
             "similarity_boost": 0.80,
             "style": 0.0,
             "use_speaker_boost": False,
-            "speed": 1.03,
+            "speed": 0.97,
         },
     }
     client = httpx.AsyncClient(timeout=httpx.Timeout(60.0, connect=10.0))
@@ -968,7 +972,7 @@ async def voice_chat(
 
             msgs = [{"role": "system", "content": sys_ctx}]
             msgs.extend(
-                {"role": r["role"], "content": r["content"]} for r in prior[-12:]
+                {"role": r["role"], "content": r["content"]} for r in prior[-8:]
             )
             msgs.append({"role": "user", "content": user_text})
 
@@ -981,7 +985,7 @@ async def voice_chat(
                     model=VOICE_MODEL,
                     messages=msgs,
                     temperature=0.65,
-                    max_tokens=160,
+                    max_tokens=96,
                     allow_desktop_actions=desktop_mode,
                 )
 

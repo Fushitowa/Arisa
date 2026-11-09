@@ -3,7 +3,7 @@ import { MessageSquare, Mic, MicOff, Send, Volume2, X } from 'lucide-react'
 import ArisaCharacter, { inferArisaEmotion } from './ArisaCharacter'
 
 const API              = '/api'
-const SILENCE_MS       = 700  // Start the response sooner while retaining a natural pause
+const SILENCE_MS       = 550  // Begin processing sooner after a natural pause
 const SPEECH_START_MS  = 150  // Reject brief clicks while arming quickly
 const VAD_CALIBRATION_MS = 300 // Establish the room's noise level before adapting the voice gate
 const MAX_RECORD_MS    = 300000 // Safety limit for an unattended recording (5 minutes)
@@ -34,7 +34,7 @@ function getSupportedMimeType() {
   }) || ''
 }
 
-function speakWithSystemVoice(text) {
+function speakWithSystemVoice(text, playbackRef, playback) {
   const engine = window.speechSynthesis
   if (!engine || !window.SpeechSynthesisUtterance) {
     return Promise.reject(new Error('This device does not provide a built-in speech voice.'))
@@ -42,16 +42,32 @@ function speakWithSystemVoice(text) {
   engine.cancel()
   const utterance = new SpeechSynthesisUtterance(text)
   utterance.lang = 'en-US'
-  utterance.rate = 0.96
-  utterance.pitch = 1.06
+  utterance.rate = 0.94
+  utterance.pitch = 0.96
   const voices = engine.getVoices()
-  utterance.voice = voices.find(voice => /jenny|zira|aria|ava|emma|michelle|monica|sara|serena|hazel/i.test(voice.name))
+  utterance.voice = voices.find(voice => /michelle|monica|serena|sonia|jane|hazel|susan/i.test(voice.name))
     || voices.find(voice => voice.lang?.toLowerCase().startsWith('en-us'))
     || voices.find(voice => voice.lang?.toLowerCase().startsWith('en'))
     || null
   return new Promise((resolve, reject) => {
-    utterance.onend = resolve
-    utterance.onerror = event => reject(new Error(event.error || 'System speech playback failed.'))
+    let settled = false
+    const settle = error => {
+      if (settled) return
+      settled = true
+      if (playbackRef.current === playback) playbackRef.current = null
+      if (error) reject(error)
+      else resolve()
+    }
+    playback.cancel = () => {
+      playback.cancelled = true
+      engine.cancel()
+      settle()
+    }
+    playbackRef.current = playback
+    utterance.onend = () => settle()
+    utterance.onerror = event => playback.cancelled
+      ? settle()
+      : settle(new Error(event.error || 'System speech playback failed.'))
     engine.speak(utterance)
   })
 }
@@ -81,6 +97,9 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
   const convIdRef      = useRef(null)
   const recorderRef    = useRef(null)
   const chunksRef      = useRef([])
+  const speechPlaybackRef = useRef(null)
+  const startListeningRef = useRef(null)
+  const pendingListenRef = useRef(false)
   const streamRef      = useRef(null)
   const audioCtxRef    = useRef(null)
   const micAnalyserRef = useRef(null)
@@ -111,6 +130,22 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
   const setOrbState = s => { orbStateRef.current = s; setOrbStateUI(s) }
   const setSession  = v => { sessionRef.current  = v; setSessionOn(v)  }
 
+  const cancelSpeechPlayback = () => {
+    const playback = speechPlaybackRef.current
+    speechPlaybackRef.current = null
+    playback?.cancel?.()
+
+    const audio = audioElRef.current
+    if (audio) {
+      audio.pause()
+      audio.currentTime = 0
+      audio.removeAttribute('src')
+      audio.load()
+    }
+    audioElRef.current = null
+    window.speechSynthesis?.cancel()
+  }
+
   // Tear everything down on unmount
   useEffect(() => () => _teardown(), [])   // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -121,7 +156,7 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
       try { recorderRef.current?.stop() } catch {}
     }
     streamRef.current?.getTracks().forEach(t => t.stop())
-    audioElRef.current?.pause()
+    cancelSpeechPlayback()
     if (audioCtxRef.current?.state !== 'closed') {
       try { audioCtxRef.current?.close() } catch {}
     }
@@ -147,26 +182,32 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
     setArisaEmotion(inferArisaEmotion(text))
     const spokenText = removeToneLabel(text)
     if (!spokenText) return
+    const playback = { cancelled: false, cancel: null }
     if (immediate) {
       setStatusHint('Speaking…')
       setOrbState('speaking')
       try {
-        await speakWithSystemVoice(spokenText)
+        await speakWithSystemVoice(spokenText, speechPlaybackRef, playback)
       } catch (e) {
-        setError(`Arisa couldn't speak the confirmation. ${e.message || ''}`.trim())
+        if (!playback.cancelled) setError(`Arisa couldn't speak the confirmation. ${e.message || ''}`.trim())
       } finally {
+        if (speechPlaybackRef.current === playback) speechPlaybackRef.current = null
         setStatusHint('')
-        if (sessionRef.current) setTimeout(() => startListening(), 200)
+        if (sessionRef.current && !playback.cancelled) {
+          setOrbState('idle')
+          setTimeout(() => { if (sessionRef.current) startListeningRef.current?.() }, 200)
+        }
         else setOrbState('idle')
       }
       return
     }
     setStatusHint('Speaking…')
+    let audio = null
     try {
       // Play progressive audio chunks in both web and desktop voice mode so
       // playback can begin before the entire response has been synthesized.
       const streamUrl = `${API}/arisa/tts/stream?text=${encodeURIComponent(spokenText)}`
-      const audio = new Audio(streamUrl)
+      audio = new Audio(streamUrl)
       audio.preload = 'auto'
       audioElRef.current = audio
 
@@ -180,24 +221,45 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
       setOrbState('speaking')
 
       await new Promise((resolve, reject) => {
-        audio.onended = resolve
-        audio.onerror = () => reject(new Error('The generated audio could not be played.'))
-        audio.play().catch(reject)
+        let settled = false
+        const settle = error => {
+          if (settled) return
+          settled = true
+          if (speechPlaybackRef.current === playback) speechPlaybackRef.current = null
+          if (error) reject(error)
+          else resolve()
+        }
+        playback.cancel = () => {
+          playback.cancelled = true
+          audio.pause()
+          audio.currentTime = 0
+          audio.removeAttribute('src')
+          audio.load()
+          settle()
+        }
+        speechPlaybackRef.current = playback
+        audio.onended = () => settle()
+        audio.onerror = () => playback.cancelled
+          ? settle()
+          : settle(new Error('The generated audio could not be played.'))
+        audio.play().catch(settle)
       })
     } catch (e) {
       try {
+        if (playback.cancelled) return
         audioElRef.current?.pause()
         if (audioCtxRef.current?.state !== 'closed') await audioCtxRef.current?.close()
         audioCtxRef.current = null
         setSpeakerAnalyser(null)
         setStatusHint('Speaking with your device voice…')
         setOrbState('speaking')
-        await speakWithSystemVoice(spokenText)
+        await speakWithSystemVoice(spokenText, speechPlaybackRef, playback)
       } catch (fallbackError) {
-        setError(`Arisa could not speak. ${e.message || 'TTS API failed.'} ${fallbackError.message || ''}`.trim())
+        if (!playback.cancelled) setError(`Arisa could not speak. ${e.message || 'TTS API failed.'} ${fallbackError.message || ''}`.trim())
       }
     } finally {
-      audioElRef.current = null
+      if (speechPlaybackRef.current === playback) speechPlaybackRef.current = null
+      if (audioElRef.current === audio) audioElRef.current = null
       setSpeakerAnalyser(null)
       setStatusHint('')
       if (audioCtxRef.current?.state !== 'closed') {
@@ -205,13 +267,14 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
       }
       audioCtxRef.current = null
       // Auto-loop: jump straight back into listening if the session is still on
-      if (sessionRef.current) {
-        setTimeout(() => startListening(), 250)
+      if (sessionRef.current && !playback.cancelled) {
+        setOrbState('idle')
+        setTimeout(() => { if (sessionRef.current) startListeningRef.current?.() }, 250)
       } else {
         setOrbState('idle')
       }
     }
-  }, [])  // startListening referenced via closure below — hoisted after definition
+  }, [])
 
   // ── Process audio blob → backend ──────────────────────────────────────────
   const processAudio = useCallback(async blob => {
@@ -246,12 +309,19 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
   // ── Start listening ───────────────────────────────────────────────────────
   const startListening = useCallback(async () => {
     if (orbStateRef.current === 'listening') return
-    if (apiStatus !== 'ready') {
-      setError(apiStatus === 'unconfigured'
-        ? 'Add your Groq API key to finish setting up Arisa.'
-        : 'Arisa is still starting. Try again in a moment.')
+    if (apiStatus === 'checking') {
+      pendingListenRef.current = true
+      setError('')
+      setStatusHint('Arisa is starting…')
       return
     }
+    if (apiStatus === 'unconfigured') {
+      pendingListenRef.current = false
+      setStatusHint('')
+      setError('Add your Groq API key to finish setting up Arisa.')
+      return
+    }
+    pendingListenRef.current = false
     setError('')
     setStatusHint('Waiting for you to speak…')
 
@@ -390,6 +460,22 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
   }, [apiStatus, processAudio, stopRecording])
 
   useEffect(() => {
+    startListeningRef.current = startListening
+  }, [startListening])
+
+  useEffect(() => {
+    if (apiStatus === 'ready' && pendingListenRef.current) {
+      pendingListenRef.current = false
+      setStatusHint('')
+      startListeningRef.current?.()
+    } else if (apiStatus === 'unconfigured' && pendingListenRef.current) {
+      pendingListenRef.current = false
+      setStatusHint('')
+      setError('Add your Groq API key to finish setting up Arisa.')
+    }
+  }, [apiStatus])
+
+  useEffect(() => {
     if (!desktopMode || !window.arisaDesktop?.onWake) return
     return window.arisaDesktop.onWake(() => {
       if (orbStateRef.current === 'idle') startListening()
@@ -429,8 +515,10 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
     if (s === 'idle') startListening()
     else if (s === 'listening') stopRecording()
     else if (s === 'speaking') {
-      audioElRef.current?.pause()
+      cancelSpeechPlayback()
       setSpeakerAnalyser(null)
+      if (audioCtxRef.current?.state !== 'closed') audioCtxRef.current?.close().catch(() => {})
+      audioCtxRef.current = null
       setOrbState('idle')
       setStatusHint('')
       // Keep session alive — user can tap again to continue
@@ -439,6 +527,7 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
 
   // ── End full session ──────────────────────────────────────────────────────
   const handleEnd = () => {
+    pendingListenRef.current = false
     setSession(false)
     _teardown()
     setOrbState('idle')
@@ -545,11 +634,13 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
           <button
             className="voice-stop-btn"
             onClick={() => {
-              audioElRef.current?.pause()
+              cancelSpeechPlayback()
               setSpeakerAnalyser(null)
+              if (audioCtxRef.current?.state !== 'closed') audioCtxRef.current?.close().catch(() => {})
+              audioCtxRef.current = null
               setOrbState('idle')
               setStatusHint('')
-              if (sessionRef.current) setTimeout(() => startListening(), 300)
+              if (sessionRef.current) setTimeout(() => { if (sessionRef.current) startListeningRef.current?.() }, 300)
             }}
           >
             <Volume2 size={18} /> Skip response
