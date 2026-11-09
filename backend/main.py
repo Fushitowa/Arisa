@@ -1,8 +1,10 @@
 import os
+import json
 import re
 import shutil
 import subprocess
 import sqlite3
+import threading
 import time
 import uuid
 import webbrowser
@@ -29,6 +31,48 @@ MAX_VOICE_UPLOAD = 25 * 1024 * 1024
 if MODEL in {"llama-3.3-70b-versatile", "llama-3.1-8b-instant"}:
     MODEL = "openai/gpt-oss-120b"
 ALLOWED = {".pdf", ".txt", ".md"}
+
+DESKTOP_APPS = {
+    "spotify": {"name": "spotify", "label": "Spotify"},
+    "brave": {"name": "brave", "label": "Brave"},
+    "vlc_media_player": {"name": "vlc media player", "label": "VLC media player"},
+    "tiktok": {"name": "tiktok", "label": "TikTok"},
+    "google_chrome": {"name": "google chrome", "label": "Google Chrome"},
+    "steam": {"name": "steam", "label": "Steam"},
+    "discord": {"name": "discord", "label": "Discord"},
+    "vs_code": {"name": "vs code", "label": "VS Code"},
+    "calculator": {"name": "calculator", "label": "Calculator"},
+    "notepad": {"name": "notepad", "label": "Notepad"},
+    "file_explorer": {"name": "file explorer", "label": "File Explorer"},
+}
+DESKTOP_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "launch_desktop_application",
+        "description": (
+            "Open one supported Windows app only when the user's latest message clearly asks Arisa "
+            "to open, launch, start, or bring it up now. Understand polite, indirect, and conversational "
+            "requests. Spotify is the only supported music player, so 'my music app' can mean Spotify. "
+            "Chrome and Brave are both supported browsers; a generic 'my browser' request is ambiguous, "
+            "so ask which one instead of choosing. Never call this for an app that is merely mentioned, "
+            "a hypothetical, a question about how to open it, or a negated request."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "app_id": {
+                    "type": "string",
+                    "enum": list(DESKTOP_APPS),
+                    "description": "The exact ID of the supported app the user wants opened.",
+                }
+            },
+            "required": ["app_id"],
+            "additionalProperties": False,
+        },
+    },
+}
+_desktop_launch_times: dict[str, float] = {}
+_desktop_launch_lock = threading.Lock()
 
 # ── Voice / TTS ──────────────────────────────────────────────────────────────
 TTS_PROVIDER       = os.getenv("TTS_PROVIDER", "edge")            # "edge" | "elevenlabs"
@@ -184,7 +228,7 @@ MEMORY_TRUTH_RULE = (
 
 
 def run_desktop_command(message: str) -> Optional[str]:
-    """Launch an app only for the direct voice/text pattern: “open <app>”."""
+    """Fast path for short, unambiguous commands; natural requests use the model tool."""
     match = re.fullmatch(
         r"\s*(?:(?:hey\s+)?arisa[, :]?\s+)?open\s+(?:the\s+)?"
         r"(vlc\s+media\s+player|google\s+chrome|visual\s+studio\s+code|"
@@ -197,28 +241,47 @@ def run_desktop_command(message: str) -> Optional[str]:
         return None
 
     spoken_name = re.sub(r"\s+", " ", match.group(1).lower())
-    app_name = {
-        "chrome": "google chrome",
-        "vlc": "vlc media player",
-        "vscode": "vs code",
-        "visual studio code": "vs code",
-    }.get(spoken_name, spoken_name)
-    labels = {
-        "spotify": "Spotify",
-        "brave": "Brave",
-        "vlc media player": "VLC media player",
-        "tiktok": "TikTok",
-        "google chrome": "Google Chrome",
-        "steam": "Steam",
-        "discord": "Discord",
-        "vs code": "VS Code",
-        "calculator": "Calculator",
-        "notepad": "Notepad",
-        "file explorer": "File Explorer",
-    }
-    label = labels[app_name]
+    app_id = {
+        "spotify": "spotify",
+        "brave": "brave",
+        "vlc": "vlc_media_player",
+        "vlc media player": "vlc_media_player",
+        "tiktok": "tiktok",
+        "chrome": "google_chrome",
+        "google chrome": "google_chrome",
+        "steam": "steam",
+        "discord": "discord",
+        "vscode": "vs_code",
+        "vs code": "vs_code",
+        "visual studio code": "vs_code",
+        "calculator": "calculator",
+        "notepad": "notepad",
+        "file explorer": "file_explorer",
+    }.get(spoken_name)
+    return launch_desktop_app(app_id) if app_id else None
+
+
+def _clear_desktop_launch_cooldown(app_id: str) -> None:
+    with _desktop_launch_lock:
+        _desktop_launch_times.pop(app_id, None)
+
+
+def launch_desktop_app(app_id: str) -> Optional[str]:
+    """Execute only a canonical app ID from the local allowlist."""
+    app = DESKTOP_APPS.get(app_id)
+    if not app:
+        return None
+    app_name = app["name"]
+    label = app["label"]
     if os.name != "nt":
         return f"I can only open {label} from the Windows desktop app."
+
+    now_mono = time.monotonic()
+    with _desktop_launch_lock:
+        last_launch = _desktop_launch_times.get(app_id)
+        if last_launch is not None and now_mono - last_launch < 5:
+            return f"{label} is already opening."
+        _desktop_launch_times[app_id] = now_mono
 
     env_path = lambda variable, default: Path(os.getenv(variable, default))
     local = env_path("LOCALAPPDATA", r"C:\Users\Default\AppData\Local")
@@ -254,8 +317,9 @@ def run_desktop_command(message: str) -> Optional[str]:
     try:
         if app_name == "tiktok":
             if not webbrowser.open("https://www.tiktok.com", new=2):
+                _clear_desktop_launch_cooldown(app_id)
                 return "I couldn't open TikTok in your default browser."
-            return "TikTok opened successfully in your default browser."
+            return "Sure, TikTok is open in your default browser."
 
         app_path = next((path for path in candidates[app_name] if path.is_file()), None)
         if not app_path:
@@ -280,19 +344,23 @@ def run_desktop_command(message: str) -> Optional[str]:
             elif updater.is_file():
                 _spawn_desktop_app([str(updater), "--processStart", "Discord.exe"])
             else:
+                _clear_desktop_launch_cooldown(app_id)
                 return "I couldn't find Discord installed on this computer."
         elif app_name in ("spotify", "steam"):
             # Store and registered installations expose protocol handlers instead of stable paths.
             os.startfile("spotify:" if app_name == "spotify" else "steam:")
         else:
+            _clear_desktop_launch_cooldown(app_id)
             return f"I couldn't find {label} installed on this computer."
     except (OSError, AttributeError) as exc:
+        _clear_desktop_launch_cooldown(app_id)
         return f"I couldn't open {label}: {str(exc)[:180]}"
 
     verified = _wait_for_desktop_process(process_names[app_name])
     if verified is True:
-        return f"{label} opened successfully."
+        return f"Sure, {label} is open."
     if verified is False:
+        _clear_desktop_launch_cooldown(app_id)
         return f"Windows did not confirm that {label} opened."
     return f"I sent Windows the request to open {label}, but couldn't verify that it opened."
 
@@ -335,12 +403,85 @@ def _wait_for_desktop_process(image_names: tuple[str, ...]) -> Optional[bool]:
 
 
 DESKTOP_ACTION_RULE = (
-    "This Windows desktop app can launch Spotify, Brave, VLC media player, TikTok in the default browser, "
-    "Google Chrome, Steam, Discord, VS Code, Calculator, Notepad, and File Explorer only when Ken directly "
-    "says to open one of them. It cannot otherwise control the PC. "
-    "Never claim that an app is opening or open unless a desktop action result is present. "
-    "When given a desktop action result, report its success or failure accurately and briefly."
+    "This Windows desktop app can launch only Spotify, Brave, VLC media player, TikTok in the default "
+    "browser, Google Chrome, Steam, Discord, VS Code, Calculator, Notepad, and File Explorer. "
+    "For the user's latest message, use natural-language understanding to decide whether Ken clearly "
+    "wants one of these apps opened, launched, started, or brought up now; polite and indirect requests count. A supported app being "
+    "mentioned is not enough. Do not act on hypotheticals, questions asking for information, or "
+    "negated/conditional requests. If the target is generic or ambiguous, ask which app he means "
+    "instead of guessing. 'My music app' can mean Spotify because it is the only supported music player; "
+    "'my browser' is ambiguous between Chrome and Brave. Unsupported apps must not be launched. "
+    "Recognize Chrome as Google Chrome, Visual Studio Code as VS Code, Explorer as File Explorer, "
+    "and VLC as VLC media player. "
+    "You may request the launch_desktop_application tool only for a clear, supported request. "
+    "Never claim an app opened unless the application code returns a launch result. Arisa has no "
+    "general access to files, keyboard input, shell commands, or arbitrary applications."
 )
+
+
+def clarify_ambiguous_desktop_target(message: str, app_ids: list[str]) -> Optional[str]:
+    """Reject model guesses when the user referred to a target shared by multiple apps."""
+    text = message.lower()
+    selected_browsers = {app_id for app_id in app_ids if app_id in {"google_chrome", "brave"}}
+    names_a_browser = re.search(r"\b(browser|web browser)\b", text)
+    names_specific_browser = re.search(r"\b(chrome|google\s+chrome|brave)\b", text)
+    if selected_browsers and names_a_browser and not names_specific_browser:
+        return "Which browser do you mean, Chrome or Brave?"
+    return None
+
+
+def create_assistant_reply(
+    client,
+    *,
+    model: str,
+    messages: list[dict],
+    temperature: float,
+    max_tokens: int,
+    allow_desktop_actions: bool = False,
+) -> tuple[str, bool]:
+    """Generate a reply and, when safely requested, execute an allowlisted app tool."""
+    request = {
+        "model": model,
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+    }
+    if allow_desktop_actions:
+        request["tools"] = [DESKTOP_TOOL]
+        request["tool_choice"] = "auto"
+
+    response = client.chat.completions.create(**request)
+    assistant_message = response.choices[0].message
+    tool_calls = getattr(assistant_message, "tool_calls", None) or []
+    if tool_calls and allow_desktop_actions:
+        requested_apps = []
+        for tool_call in tool_calls:
+            function = getattr(tool_call, "function", None)
+            if getattr(function, "name", None) != "launch_desktop_application":
+                return "Which supported application would you like me to open?", False
+            try:
+                arguments = json.loads(function.arguments)
+            except (TypeError, ValueError):
+                return "Which supported application would you like me to open?", False
+            app_id = arguments.get("app_id") if isinstance(arguments, dict) else None
+            if app_id not in DESKTOP_APPS:
+                return "Which supported application would you like me to open?", False
+            if app_id not in requested_apps:
+                requested_apps.append(app_id)
+
+        if not requested_apps or len(requested_apps) > 3:
+            return "Please tell me which one supported application you want opened first.", False
+        latest_user_message = next(
+            (item["content"] for item in reversed(messages) if item.get("role") == "user"),
+            "",
+        )
+        clarification = clarify_ambiguous_desktop_target(latest_user_message, requested_apps)
+        if clarification:
+            return clarification, False
+        results = [launch_desktop_app(app_id) for app_id in requested_apps]
+        return " ".join(result for result in results if result), True
+
+    return assistant_message.content or "I wasn't able to form a response just now.", False
 
 
 ARISA_PERSONALITY = (
@@ -442,14 +583,25 @@ def chat(body: ChatRequest):
             messages.append({"role": "user", "content": body.message})
             if action_result:
                 reply = action_result
+                model_desktop_action = False
             else:
-                result = client.chat.completions.create(model=MODEL, messages=messages, temperature=0.6, max_tokens=1200)
-                reply = result.choices[0].message.content or "I wasn't able to form a response just now."
+                reply, model_desktop_action = create_assistant_reply(
+                    client,
+                    model=MODEL,
+                    messages=messages,
+                    temperature=0.6,
+                    max_tokens=1200,
+                    allow_desktop_actions=body.desktop_mode,
+                )
             timestamp = now()
             conn.execute("INSERT INTO messages VALUES(?,?,?,?,?)", (str(uuid.uuid4()), conversation_id, "user", body.message, timestamp))
             conn.execute("INSERT INTO messages VALUES(?,?,?,?,?)", (str(uuid.uuid4()), conversation_id, "assistant", reply, timestamp))
             conn.execute("UPDATE conversations SET updated_at=? WHERE id=?", (timestamp, conversation_id))
-        return {"conversation_id": conversation_id, "reply": reply, "desktop_action": bool(action_result)}
+        return {
+            "conversation_id": conversation_id,
+            "reply": reply,
+            "desktop_action": bool(action_result) or model_desktop_action,
+        }
     except HTTPException:
         raise
     except Exception as exc:
@@ -822,11 +974,16 @@ async def voice_chat(
 
             if action_result:
                 reply = action_result
+                model_desktop_action = False
             else:
-                result = client.chat.completions.create(
-                    model=VOICE_MODEL, messages=msgs, temperature=0.65, max_tokens=160
+                reply, model_desktop_action = create_assistant_reply(
+                    client,
+                    model=VOICE_MODEL,
+                    messages=msgs,
+                    temperature=0.65,
+                    max_tokens=160,
+                    allow_desktop_actions=desktop_mode,
                 )
-                reply = result.choices[0].message.content or "I wasn't able to form a response."
 
             # 4. Persist both turns
             ts = now()
@@ -846,7 +1003,7 @@ async def voice_chat(
             "conversation_id": conv_id,
             "user_transcript": user_text,
             "arisa_reply": reply,
-            "desktop_action": bool(action_result),
+            "desktop_action": bool(action_result) or model_desktop_action,
         }
 
     except HTTPException:
