@@ -337,9 +337,34 @@
 
 /* Standalone desktop voice workspace */
 .desktop-voice-shell{min-height:100vh;display:flex;background:radial-gradient(ellipse at 50% 40%,#18132a 0%,#09090d 68%)}
-.desktop-voice-shell .voice-mode{width:100%;max-width:900px;margin:0 auto;justify-content:center;padding:34px 28px;gap:20px}
-.desktop-voice-shell .voice-stage{min-height:260px}
+.desktop-voice-shell .voice-mode{width:100%;max-width:900px;margin:0 auto;justify-content:flex-start;padding:22px 28px;gap:12px}
+.desktop-voice-shell .voice-header{max-width:560px}
+.desktop-voice-shell .voice-stage{min-height:220px;gap:10px}
+.desktop-voice-shell .arisa-character-button{width:250px;height:235px}
 .desktop-voice-shell .voice-text-composer{width:min(560px,100%);display:flex;align-items:flex-end;gap:10px;padding:9px 10px 9px 16px;border:1px solid #ffffff18;border-radius:16px;background:#111017;box-shadow:0 12px 45px #0005}
+.voice-activation-settings{width:min(560px,100%);padding:15px 16px;border:1px solid #ffffff12;border-radius:13px;background:linear-gradient(145deg,#121119ef,#0e0d12ef);box-shadow:0 12px 36px #0003;display:flex;flex-direction:column;gap:12px}
+.wake-settings-heading{display:flex;align-items:center;gap:10px}
+.wake-settings-icon{height:31px;width:31px;flex:0 0 31px;border-radius:9px;display:grid;place-items:center;background:#a28cff12;border:1px solid #a28cff24;color:#b8a4ff}
+.wake-settings-title{display:flex;flex:1;min-width:0;flex-direction:column;gap:3px}
+.wake-settings-title strong,.wake-setting-row strong{font-size:11px;font-weight:600;color:#e4e1eb}
+.wake-settings-title span,.wake-setting-row span{font-size:9px;line-height:1.45;color:#85828f}
+.wake-state-badge{display:inline-flex;align-items:center;gap:6px;padding:5px 8px;border:1px solid #ffffff12;border-radius:20px;font-size:9px;color:#9995a3;white-space:nowrap}
+.wake-state-badge i{width:6px;height:6px;border-radius:50%;background:#797681}
+.wake-state-badge.listening{color:#8ed8af;border-color:#71d2a228;background:#71d2a20a}.wake-state-badge.listening i{background:#71d2a2;box-shadow:0 0 8px #71d2a277}
+.wake-state-badge.starting,.wake-state-badge.retrying{color:#d1b67d}.wake-state-badge.starting i,.wake-state-badge.retrying i{background:#d1b67d;animation:wake-pulse 1s ease-in-out infinite alternate}
+.wake-state-badge.error{color:#f19a9a;border-color:#f8717128;background:#f871710a}.wake-state-badge.error i{background:#f87171}
+.wake-setting-row{display:flex;align-items:center;gap:15px;justify-content:space-between;padding-top:10px;border-top:1px solid #ffffff0c}
+.wake-setting-row>div{display:flex;flex-direction:column;gap:4px}
+.wake-switch{height:22px;width:39px;flex:0 0 39px;padding:2px;border:1px solid #ffffff20;border-radius:20px;background:#292731;transition:.18s}
+.wake-switch i{display:block;width:16px;height:16px;border-radius:50%;background:#aaa7b2;transition:transform .18s,background .18s}
+.wake-switch.enabled{background:#765fbd;border-color:#a28cff80}.wake-switch.enabled i{transform:translateX(17px);background:white}
+.wake-switch:disabled{opacity:.55;cursor:wait}
+.wake-listener-error{display:flex;align-items:flex-start;gap:8px;padding:9px 10px;border:1px solid #f8717128;border-radius:8px;background:#f871710c;color:#f29b9b;font-size:10px;line-height:1.5;overflow-wrap:anywhere}
+.wake-listener-error svg{flex:0 0 auto;margin-top:1px}
+.wake-retry-button{align-self:flex-start;display:flex;align-items:center;gap:7px;padding:7px 10px;border:1px solid #a28cff35;border-radius:7px;background:#a28cff10;color:#c5b5ff;font-size:10px}
+.wake-retry-button:hover{background:#a28cff1c}.wake-retry-button:disabled{opacity:.6;cursor:wait}
+.wake-private-note{display:flex;align-items:center;gap:7px;margin:0;color:#8ecbab;font-size:9px}.wake-private-note svg{flex:0 0 auto}
+@keyframes wake-pulse{to{opacity:.4}}
 .voice-text-composer textarea{flex:1;min-height:38px;max-height:120px;resize:vertical;border:0;outline:0;background:transparent;color:#e9e8ed;padding:10px 0;font-size:13px}
 .voice-text-composer textarea::placeholder{color:#777380}
 .voice-text-composer button{width:38px;height:38px;flex:0 0 38px;display:grid;place-items:center;border:0;border-radius:12px;background:#8b6cff;color:white}

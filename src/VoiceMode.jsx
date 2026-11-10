@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
-import { MessageSquare, Mic, MicOff, Send, Volume2, X } from 'lucide-react'
+import { AlertCircle, CheckCircle2, MessageSquare, Mic, MicOff, RefreshCw, Send, Volume2, X } from 'lucide-react'
 import ArisaCharacter, { inferArisaEmotion } from './ArisaCharacter'
 
 const API              = '/api'
@@ -100,6 +100,8 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
   const [textBusy,        setTextBusy]        = useState(false)
   const [apiStatus,       setApiStatus]       = useState('checking')
   const [arisaEmotion,    setArisaEmotion]    = useState('neutral')
+  const [wakeStatus,      setWakeStatus]      = useState(null)
+  const [wakeSettingsBusy,setWakeSettingsBusy]= useState(false)
 
   // ── Refs (used inside callbacks to avoid stale closures) ─────────────────
   const orbStateRef    = useRef('idle')
@@ -145,6 +147,45 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
     checkApi()
     return () => { stopped = true; clearTimeout(retryTimer) }
   }, [])
+
+  useEffect(() => {
+    if (!desktopMode || !window.arisaDesktop?.getWakeStatus) return
+    let stopped = false
+    const unsubscribe = window.arisaDesktop.onWakeStatus?.(status => {
+      if (!stopped) setWakeStatus(status)
+    })
+    window.arisaDesktop.getWakeStatus()
+      .then(status => { if (!stopped) setWakeStatus(status) })
+      .catch(error => {
+        if (!stopped) setWakeStatus({ enabled: false, runAtLogin: false, state: 'error', error: error.message })
+      })
+    return () => { stopped = true; unsubscribe?.() }
+  }, [desktopMode])
+
+  const updateWakeSetting = async (setting, enabled) => {
+    setWakeSettingsBusy(true)
+    try {
+      const method = setting === 'enabled' ? 'setWakeEnabled' : 'setWakeStartup'
+      const status = await window.arisaDesktop?.[method]?.(enabled)
+      if (status) setWakeStatus(status)
+    } catch (error) {
+      setWakeStatus(current => ({ ...current, state: 'error', error: error.message || 'Could not update the voice activation setting.' }))
+    } finally {
+      setWakeSettingsBusy(false)
+    }
+  }
+
+  const retryWakeListener = async () => {
+    setWakeSettingsBusy(true)
+    try {
+      const status = await window.arisaDesktop?.retryWakeListener?.()
+      if (status) setWakeStatus(status)
+    } catch (error) {
+      setWakeStatus(current => ({ ...current, state: 'error', error: error.message || 'Could not restart the wake listener.' }))
+    } finally {
+      setWakeSettingsBusy(false)
+    }
+  }
 
   /** Sync state + matching ref together. */
   const setOrbState = s => { orbStateRef.current = s; setOrbStateUI(s) }
@@ -1048,6 +1089,28 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
           placeholder="Type to Arisa — replies are spoken aloud" aria-label="Message Arisa by text" />
         <button type="submit" disabled={apiStatus !== 'ready' || !textInput.trim() || textBusy} aria-label="Send message"><Send size={17}/></button>
       </form>}
+
+      {desktopMode && wakeStatus && <section className="voice-activation-settings" aria-label="Voice activation settings">
+        <div className="wake-settings-heading">
+          <div className="wake-settings-icon"><Mic size={16}/></div>
+          <div className="wake-settings-title"><strong>Voice activation</strong><span>Manage hands-free access to Arisa</span></div>
+          <span className={`wake-state-badge ${wakeStatus.state}`} role="status">
+            <i />{wakeStatus.state === 'listening' ? 'Listening locally' : wakeStatus.state === 'starting' ? 'Starting' : wakeStatus.state === 'retrying' ? 'Retrying' : wakeStatus.state === 'paused' ? 'Paused during voice session' : wakeStatus.state === 'error' ? 'Listener error' : 'Off'}
+          </span>
+        </div>
+        <div className="wake-setting-row">
+          <div><strong>Listen for wake phrases</strong><span>“Wake up Arisa,” “Arisa open,” or “I need you Arisa.”</span></div>
+          <button type="button" className={`wake-switch ${wakeStatus.enabled ? 'enabled' : ''}`} role="switch" aria-checked={!!wakeStatus.enabled} aria-label="Enable voice activation" disabled={wakeSettingsBusy} onClick={() => updateWakeSetting('enabled', !wakeStatus.enabled)}><i /></button>
+        </div>
+        <div className="wake-setting-row startup-row">
+          <div><strong>Start Arisa with Windows</strong><span>Keep wake phrases available after you sign in.</span></div>
+          <button type="button" className={`wake-switch ${wakeStatus.runAtLogin ? 'enabled' : ''}`} role="switch" aria-checked={!!wakeStatus.runAtLogin} aria-label="Start Arisa with Windows" disabled={wakeSettingsBusy} onClick={() => updateWakeSetting('startup', !wakeStatus.runAtLogin)}><i /></button>
+        </div>
+        {wakeStatus.error && <div className="wake-listener-error" role="alert"><AlertCircle size={15}/><span>{wakeStatus.error}</span></div>}
+        {wakeStatus.startupError && <div className="wake-listener-error" role="alert"><AlertCircle size={15}/><span>{wakeStatus.startupError}</span></div>}
+        {['error', 'stopped', 'retrying'].includes(wakeStatus.state) && wakeStatus.enabled && <button type="button" className="wake-retry-button" onClick={retryWakeListener} disabled={wakeSettingsBusy}><RefreshCw size={14}/>{wakeSettingsBusy ? 'Starting listener…' : 'Retry wake listener'}</button>}
+        {wakeStatus.state === 'listening' && <p className="wake-private-note"><CheckCircle2 size={13}/> Wake phrase audio is processed on this PC and is not saved.</p>}
+      </section>}
 
     </div>
   )

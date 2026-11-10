@@ -94,20 +94,13 @@ def ensure_model() -> Path:
     return model_path
 
 
-def main() -> None:
-    try:
-        import sounddevice as sd
-        from vosk import KaldiRecognizer, Model
-    except ImportError as exc:
-        print(f"Wake listener dependencies are missing: {exc}", file=sys.stderr)
-        raise SystemExit(2)
-
+def run_listener(sd, KaldiRecognizer, Model) -> None:
     model = Model(str(ensure_model()))
     recognizer = KaldiRecognizer(model, 16000, json.dumps([*WAKE_GRAMMAR, "[unk]"]))
     recognizer.SetWords(True)
-    print("Waiting locally for an authorized Arisa wake phrase.", flush=True)
     last_wake = 0.0
     with sd.RawInputStream(samplerate=16000, blocksize=8000, dtype="int16", channels=1) as stream:
+        print("Wake listener active; listening locally for authorized phrases.", flush=True)
         while True:
             audio, overflowed = stream.read(4000)
             if overflowed:
@@ -121,6 +114,21 @@ def main() -> None:
                         urllib.request.urlopen(request, timeout=2).close()
                     except OSError as exc:
                         print(f"Could not notify the desktop app: {exc}", file=sys.stderr, flush=True)
+
+
+def main() -> None:
+    try:
+        import sounddevice as sd
+        from vosk import KaldiRecognizer, Model
+    except ImportError as exc:
+        print(f"Wake listener dependencies are missing: {exc}", file=sys.stderr, flush=True)
+        raise SystemExit(2)
+
+    try:
+        run_listener(sd, KaldiRecognizer, Model)
+    except Exception as exc:
+        print(f"Wake listener failed: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
+        raise SystemExit(1) from exc
 
 
 if __name__ == "__main__":

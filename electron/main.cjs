@@ -16,6 +16,10 @@ let windowRef
 let tray
 let listener
 let listenerRestartAttempts = 0
+let listenerReady = false
+let listenerError = ''
+let listenerOutput = ''
+let startupError = ''
 let backend
 let vite
 let listenerEnabled = true
@@ -123,11 +127,38 @@ function shouldListenForWake() {
     && (!windowRef || windowRef.isDestroyed() || !windowRef.isVisible() || voiceUiState === 'idle')
 }
 
+function getWakeStatus() {
+  let state = 'stopped'
+  if (!listenerEnabled) state = 'disabled'
+  else if (!backendReady) state = 'starting'
+  else if (listenerReady) state = 'listening'
+  else if (listener) state = 'starting'
+  else if (listenerError) state = listenerRestartAttempts < 3 ? 'retrying' : 'error'
+  else if (!shouldListenForWake()) state = 'paused'
+  else state = 'starting'
+
+  return {
+    enabled: listenerEnabled,
+    runAtLogin: app.isReady() && app.getLoginItemSettings().openAtLogin,
+    state,
+    error: listenerError,
+    startupError,
+  }
+}
+
+function publishWakeStatus() {
+  if (windowRef && !windowRef.isDestroyed() && !windowRef.webContents.isDestroyed()) {
+    windowRef.webContents.send('wake-status', getWakeStatus())
+  }
+}
+
 function stopWakeListener() {
   if (!listener) return
   const current = listener
   listener = null
+  listenerReady = false
   current.kill()
+  publishWakeStatus()
 }
 
 function reconcileWakeListener() {
@@ -139,27 +170,62 @@ function startWakeListener() {
   if (!shouldListenForWake() || listener) return
   const script = path.join(backendDir, 'wake_listener.py')
   const startedAt = Date.now()
+  listenerReady = false
+  listenerError = ''
+  listenerOutput = ''
   const child = spawn(pythonPath(), [script], {
-    cwd: path.dirname(script), windowsHide: true, stdio: 'ignore',
+    cwd: path.dirname(script), windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
     env: { ...process.env, ARISA_WAKE_MODEL_DIR: path.join(app.getPath('userData'), 'wake-model') },
   })
   listener = child
-  child.on('error', () => {
-    tray?.displayBalloon({ title: 'Arisa wake word unavailable', content: 'Install backend requirements to enable local wake listening.' })
+  publishWakeStatus()
+
+  child.stdout.on('data', chunk => {
+    const output = chunk.toString()
+    listenerOutput = `${listenerOutput}${output}`.slice(-4000)
+    if (output.includes('Wake listener active')) {
+      listenerReady = true
+      listenerError = ''
+      listenerRestartAttempts = 0
+      publishWakeStatus()
+    }
+  })
+  child.stderr.on('data', chunk => {
+    const output = chunk.toString()
+    listenerOutput = `${listenerOutput}${output}`.slice(-4000)
+    const failure = output.match(/Wake listener (?:failed|dependencies are missing):[^\r\n]*/i)
+    if (failure) {
+      listenerError = failure[0]
+      publishWakeStatus()
+    }
+  })
+  child.on('error', error => {
+    listenerError = `Could not start the wake listener: ${error.message}`
     if (listener === child) listener = null
+    listenerReady = false
+    publishWakeStatus()
   })
   child.on('exit', code => {
     if (listener === child) listener = null
+    listenerReady = false
     if (shouldListenForWake() && code !== 0) {
+      if (!listenerError) {
+        listenerError = listenerOutput.split(/\r?\n/).filter(Boolean).slice(-1)[0]
+          || `The wake listener exited with code ${code}.`
+      }
       if (Date.now() - startedAt >= 30000) listenerRestartAttempts = 0
       if (listenerRestartAttempts < 3) {
         listenerRestartAttempts += 1
         setTimeout(startWakeListener, 5000)
       }
-      else tray?.displayBalloon({ title: 'Arisa wake word stopped', content: 'Check microphone access and install the backend requirements.' })
+      else tray?.displayBalloon({
+        title: 'Arisa wake word stopped',
+        content: `${listenerError} Check Windows microphone access and the backend setup.`.slice(0, 240),
+      })
     } else if (code === 0 || Date.now() - startedAt >= 30000) {
       listenerRestartAttempts = 0
     }
+    publishWakeStatus()
   })
 }
 
@@ -229,19 +295,11 @@ function refreshTrayMenu() {
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: 'Open Arisa AI', click: showWindow },
     { label: 'Voice activation (Wake up Arisa / Arisa open / I need you Arisa)', type: 'checkbox', checked: listenerEnabled, click: item => {
-      listenerEnabled = item.checked
-      if (listenerEnabled) listenerRestartAttempts = 0
-      saveSettings({ voiceActivationEnabled: listenerEnabled })
-      reconcileWakeListener()
-      tray.setToolTip(listenerEnabled
-        ? 'Arisa AI voice activation is enabled; listening locally for its wake phrases'
-        : 'Arisa AI voice activation is disabled')
-      refreshTrayMenu()
+      setVoiceActivation(item.checked)
     } },
     { label: 'Run listener when Windows starts', type: 'checkbox', checked: startup, click: item => {
-      setStartup(item.checked)
-      saveSettings({ startupConfigured: true })
-      refreshTrayMenu()
+      const status = setWindowsStartup(item.checked)
+      if (status.startupError) tray?.displayBalloon({ title: 'Arisa startup setting failed', content: status.startupError })
     } },
     { type: 'separator' },
     { label: 'Quit Arisa AI', click: () => { quitting = true; app.quit() } },
@@ -251,6 +309,41 @@ function refreshTrayMenu() {
 function setStartup(enabled) {
   const args = dev ? [root, '--hidden'] : ['--hidden']
   app.setLoginItemSettings({ openAtLogin: enabled, path: process.execPath, args })
+}
+
+function setVoiceActivation(enabled) {
+  listenerEnabled = enabled === true
+  saveSettings({ voiceActivationEnabled: listenerEnabled })
+  listenerRestartAttempts = 0
+  listenerError = ''
+  reconcileWakeListener()
+  refreshTrayMenu()
+  tray?.setToolTip(listenerEnabled
+    ? 'Arisa AI voice activation is enabled; listening locally for its wake phrases'
+    : 'Arisa AI voice activation is disabled')
+  publishWakeStatus()
+  return getWakeStatus()
+}
+
+function setWindowsStartup(enabled) {
+  setStartup(enabled === true)
+  const registered = app.getLoginItemSettings().openAtLogin
+  saveSettings({ runAtLoginEnabled: registered })
+  startupError = registered === (enabled === true)
+    ? ''
+    : 'Windows did not save the startup setting. Try enabling it again.'
+  refreshTrayMenu()
+  publishWakeStatus()
+  return getWakeStatus()
+}
+
+function retryWakeListener() {
+  listenerRestartAttempts = 0
+  listenerError = ''
+  if (listener) stopWakeListener()
+  reconcileWakeListener()
+  publishWakeStatus()
+  return getWakeStatus()
 }
 
 function createWindow() {
@@ -287,16 +380,30 @@ app.whenReady().then(async () => {
     if (!['idle', 'session-idle', 'starting', 'listening', 'thinking', 'speaking'].includes(state)) return
     voiceUiState = state
     reconcileWakeListener()
+    publishWakeStatus()
   })
+  ipcMain.handle('wake:get-status', () => getWakeStatus())
+  ipcMain.handle('wake:set-enabled', (_event, enabled) => setVoiceActivation(enabled))
+  ipcMain.handle('wake:set-startup', (_event, enabled) => setWindowsStartup(enabled))
+  ipcMain.handle('wake:retry', () => retryWakeListener())
   session.defaultSession.setPermissionRequestHandler((_contents, permission, callback) => {
     callback(permission === 'media' || permission === 'notifications')
   })
   session.defaultSession.setPermissionCheckHandler((_contents, permission) => permission === 'media' || permission === 'notifications')
   createTray()
   startWakeBridge()
-  if (!hiddenAtLaunch && settings.startupConfigured !== true) {
-    setStartup(true)
-    saveSettings({ startupConfigured: true })
+  // Older builds could leave startupConfigured=true after the Windows Run
+  // entry was removed. Treat an unset preference as enabled, then persist the
+  // actual OS registration so voice activation starts after future sign-ins.
+  const runAtLoginEnabled = settings.runAtLoginEnabled !== false
+  setStartup(runAtLoginEnabled)
+  const startupRegistered = app.getLoginItemSettings().openAtLogin
+  saveSettings({ runAtLoginEnabled: startupRegistered })
+  startupError = runAtLoginEnabled && !startupRegistered
+    ? 'Windows did not register Arisa to start at sign-in.'
+    : ''
+  if (runAtLoginEnabled && !startupRegistered) {
+    tray?.displayBalloon({ title: 'Arisa startup setting failed', content: 'Windows did not register Arisa to start at sign-in. Enable it from the tray menu.' })
   }
   refreshTrayMenu()
   await startVite()
@@ -304,6 +411,7 @@ app.whenReady().then(async () => {
   createWindow()
   backendStartup.then(() => {
     reconcileWakeListener()
+    publishWakeStatus()
   }).catch(() => {
     tray?.displayBalloon({ title: 'Arisa AI', content: 'The API could not start. Check Python and backend dependencies.' })
   })
