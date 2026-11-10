@@ -14,6 +14,42 @@ from pathlib import Path
 MODEL_NAME = "vosk-model-small-en-us-0.15"
 MODEL_URL = f"https://alphacephei.com/vosk/models/{MODEL_NAME}.zip"
 MODEL_DIR = Path(os.getenv("ARISA_WAKE_MODEL_DIR", str(Path.home() / ".arisa-ai" / "wake-model")))
+AUTHORIZED_WAKE_PHRASES = frozenset({
+    "wake up arisa",
+    "arisa open",
+    "i need you arisa",
+})
+WAKE_TRANSCRIPT_ALIASES = {
+    # The bundled English model lacks "Arisa" in its lexicon. These are the
+    # exact word sequences it produced when tested with locally synthesized speech.
+    "wake up or issa": "wake up arisa",
+    "a recent open": "arisa open",
+    "i need you or risa": "i need you arisa",
+}
+WAKE_GRAMMAR = sorted(AUTHORIZED_WAKE_PHRASES | WAKE_TRANSCRIPT_ALIASES.keys())
+MIN_WORD_CONFIDENCE = 0.55
+
+
+def normalize_wake_text(text: str) -> str:
+    """Normalize punctuation and capitalization without accepting extra words."""
+    words = re.findall(r"[a-z]+", str(text).lower())
+    # Small English models occasionally spell the proper name phonetically.
+    words = ["arisa" if word == "arissa" else word for word in words]
+    normalized = " ".join(words)
+    return WAKE_TRANSCRIPT_ALIASES.get(normalized, normalized)
+
+
+def is_authorized_wake_result(result: dict, min_confidence: float = MIN_WORD_CONFIDENCE) -> bool:
+    """Require an exact authorized phrase and confident word-level recognition."""
+    if normalize_wake_text(result.get("text", "")) not in AUTHORIZED_WAKE_PHRASES:
+        return False
+    words = result.get("result")
+    if not isinstance(words, list) or not words:
+        return False
+    try:
+        return all(float(word["conf"]) >= min_confidence for word in words)
+    except (KeyError, TypeError, ValueError):
+        return False
 
 
 def ensure_model() -> Path:
@@ -67,9 +103,9 @@ def main() -> None:
         raise SystemExit(2)
 
     model = Model(str(ensure_model()))
-    recognizer = KaldiRecognizer(model, 16000, json.dumps(["arisa", "[unk]"]))
-    recognizer.SetWords(False)
-    print("Waiting locally for the wake word Arisa.", flush=True)
+    recognizer = KaldiRecognizer(model, 16000, json.dumps([*WAKE_GRAMMAR, "[unk]"]))
+    recognizer.SetWords(True)
+    print("Waiting locally for an authorized Arisa wake phrase.", flush=True)
     last_wake = 0.0
     with sd.RawInputStream(samplerate=16000, blocksize=8000, dtype="int16", channels=1) as stream:
         while True:
@@ -77,15 +113,14 @@ def main() -> None:
             if overflowed:
                 continue
             if recognizer.AcceptWaveform(audio):
-                text = json.loads(recognizer.Result()).get("text", "")
-                normalized = re.sub(r"[^a-z\s]", " ", text.lower())
-                if re.search(r"\bari(?:sa|ssa)\b", normalized) and time.monotonic() - last_wake > 4:
+                result = json.loads(recognizer.Result())
+                if is_authorized_wake_result(result) and time.monotonic() - last_wake > 4:
                     last_wake = time.monotonic()
                     request = urllib.request.Request("http://127.0.0.1:8765/wake", data=b"{}", method="POST")
                     try:
                         urllib.request.urlopen(request, timeout=2).close()
-                    except OSError:
-                        pass
+                    except OSError as exc:
+                        print(f"Could not notify the desktop app: {exc}", file=sys.stderr, flush=True)
 
 
 if __name__ == "__main__":

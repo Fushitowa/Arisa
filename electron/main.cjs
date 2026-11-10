@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Tray, Menu, session, nativeImage } = require('electron')
+const { app, BrowserWindow, Tray, Menu, session, nativeImage, ipcMain } = require('electron')
 const { spawn } = require('node:child_process')
 const fs = require('node:fs')
 const path = require('node:path')
@@ -15,12 +15,21 @@ const appIconPath = path.join(root, dev ? 'public' : 'dist', 'arisa-icon.png')
 let windowRef
 let tray
 let listener
-let listenerAttempts = 0
+let listenerRestartAttempts = 0
 let backend
 let vite
 let listenerEnabled = true
 let backendReady = false
 let quitting = false
+let voiceUiState = 'idle'
+let lastWakeAt = 0
+
+const ownsSingleInstance = app.requestSingleInstanceLock()
+if (!ownsSingleInstance) {
+  app.quit()
+} else {
+  app.on('second-instance', () => showWindow())
+}
 
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required')
 
@@ -109,29 +118,56 @@ async function startVite() {
   }
 }
 
+function shouldListenForWake() {
+  return backendReady && listenerEnabled && !quitting
+    && (!windowRef || windowRef.isDestroyed() || !windowRef.isVisible() || voiceUiState === 'idle')
+}
+
+function stopWakeListener() {
+  if (!listener) return
+  const current = listener
+  listener = null
+  current.kill()
+}
+
+function reconcileWakeListener() {
+  if (shouldListenForWake()) startWakeListener()
+  else stopWakeListener()
+}
+
 function startWakeListener() {
-  if (!backendReady || !listenerEnabled || listener || windowRef?.isVisible()) return
-  listenerAttempts += 1
+  if (!shouldListenForWake() || listener) return
   const script = path.join(backendDir, 'wake_listener.py')
-  listener = spawn(pythonPath(), [script], {
+  const startedAt = Date.now()
+  const child = spawn(pythonPath(), [script], {
     cwd: path.dirname(script), windowsHide: true, stdio: 'ignore',
     env: { ...process.env, ARISA_WAKE_MODEL_DIR: path.join(app.getPath('userData'), 'wake-model') },
   })
-  listener.on('error', () => {
+  listener = child
+  child.on('error', () => {
     tray?.displayBalloon({ title: 'Arisa wake word unavailable', content: 'Install backend requirements to enable local wake listening.' })
-    listener = null
+    if (listener === child) listener = null
   })
-  listener.on('exit', code => {
-    listener = null
-    if (listenerEnabled && !quitting && code !== 0) {
-      if (listenerAttempts < 3) setTimeout(startWakeListener, 5000)
+  child.on('exit', code => {
+    if (listener === child) listener = null
+    if (shouldListenForWake() && code !== 0) {
+      if (Date.now() - startedAt >= 30000) listenerRestartAttempts = 0
+      if (listenerRestartAttempts < 3) {
+        listenerRestartAttempts += 1
+        setTimeout(startWakeListener, 5000)
+      }
       else tray?.displayBalloon({ title: 'Arisa wake word stopped', content: 'Check microphone access and install the backend requirements.' })
+    } else if (code === 0 || Date.now() - startedAt >= 30000) {
+      listenerRestartAttempts = 0
     }
   })
 }
 
 function sendWake() {
   if (!windowRef || windowRef.isDestroyed()) return
+  if (Date.now() - lastWakeAt < 2500) return
+  lastWakeAt = Date.now()
+  voiceUiState = 'starting'
   showWindow()
   if (windowRef.webContents.isLoading()) windowRef.webContents.once('did-finish-load', () => windowRef?.webContents.send('wake-detected'))
   else windowRef.webContents.send('wake-detected')
@@ -150,20 +186,40 @@ function startWakeBridge() {
   app.on('before-quit', () => server.close())
 }
 
+function wakeSettingsPath() {
+  return path.join(app.getPath('userData'), 'settings.json')
+}
+
+function readSettings() {
+  try {
+    return JSON.parse(fs.readFileSync(wakeSettingsPath(), 'utf8'))
+  } catch {
+    return {}
+  }
+}
+
+function saveSettings(update) {
+  const file = wakeSettingsPath()
+  const temporary = `${file}.tmp`
+  fs.mkdirSync(path.dirname(file), { recursive: true })
+  fs.writeFileSync(temporary, JSON.stringify({ ...readSettings(), ...update }, null, 2))
+  fs.renameSync(temporary, file)
+}
+
 function createTray() {
   const icon = nativeImage.createFromPath(appIconPath)
   tray = new Tray(icon)
-  tray.setToolTip('Arisa AI is listening for “Arisa” on this PC')
+  tray.setToolTip('Arisa AI voice activation is enabled; listening locally for its wake phrases')
   tray.on('double-click', () => showWindow())
   refreshTrayMenu()
 }
 
 function showWindow() {
   if (windowRef && !windowRef.isDestroyed()) {
-    listener?.kill()
-    listener = null
+    if (windowRef.isMinimized()) windowRef.restore()
     windowRef.show()
     windowRef.focus()
+    reconcileWakeListener()
   }
 }
 
@@ -172,14 +228,19 @@ function refreshTrayMenu() {
   const startup = app.getLoginItemSettings().openAtLogin
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: 'Open Arisa AI', click: showWindow },
-    { label: 'Listen for “Arisa”', type: 'checkbox', checked: listenerEnabled, click: item => {
+    { label: 'Voice activation (Wake up Arisa / Arisa open / I need you Arisa)', type: 'checkbox', checked: listenerEnabled, click: item => {
       listenerEnabled = item.checked
-      if (listenerEnabled) startWakeListener()
-      else { listener?.kill(); listener = null }
+      if (listenerEnabled) listenerRestartAttempts = 0
+      saveSettings({ voiceActivationEnabled: listenerEnabled })
+      reconcileWakeListener()
+      tray.setToolTip(listenerEnabled
+        ? 'Arisa AI voice activation is enabled; listening locally for its wake phrases'
+        : 'Arisa AI voice activation is disabled')
       refreshTrayMenu()
     } },
     { label: 'Run listener when Windows starts', type: 'checkbox', checked: startup, click: item => {
       setStartup(item.checked)
+      saveSettings({ startupConfigured: true })
       refreshTrayMenu()
     } },
     { type: 'separator' },
@@ -206,26 +267,43 @@ function createWindow() {
     if (!quitting) {
       event.preventDefault()
       windowRef.webContents.send('window-hidden')
+      voiceUiState = 'idle'
       windowRef.hide()
-      startWakeListener()
+      reconcileWakeListener()
     }
+  })
+  windowRef.on('minimize', () => {
+    windowRef.webContents.send('window-hidden')
+    voiceUiState = 'idle'
+    reconcileWakeListener()
   })
 }
 
 app.whenReady().then(async () => {
+  if (!ownsSingleInstance) return
+  const settings = readSettings()
+  listenerEnabled = settings.voiceActivationEnabled !== false
+  ipcMain.on('voice-state', (_event, state) => {
+    if (!['idle', 'session-idle', 'starting', 'listening', 'thinking', 'speaking'].includes(state)) return
+    voiceUiState = state
+    reconcileWakeListener()
+  })
   session.defaultSession.setPermissionRequestHandler((_contents, permission, callback) => {
     callback(permission === 'media' || permission === 'notifications')
   })
   session.defaultSession.setPermissionCheckHandler((_contents, permission) => permission === 'media' || permission === 'notifications')
   createTray()
   startWakeBridge()
-  if (!hiddenAtLaunch) setStartup(true)
+  if (!hiddenAtLaunch && settings.startupConfigured !== true) {
+    setStartup(true)
+    saveSettings({ startupConfigured: true })
+  }
   refreshTrayMenu()
   await startVite()
   const backendStartup = startBackend()
   createWindow()
   backendStartup.then(() => {
-    if (hiddenAtLaunch || !windowRef?.isVisible()) startWakeListener()
+    reconcileWakeListener()
   }).catch(() => {
     tray?.displayBalloon({ title: 'Arisa AI', content: 'The API could not start. Check Python and backend dependencies.' })
   })
@@ -234,7 +312,7 @@ app.whenReady().then(async () => {
 app.on('window-all-closed', event => event.preventDefault())
 app.on('before-quit', () => {
   quitting = true
-  listener?.kill()
+  stopWakeListener()
   backend?.kill()
   vite?.kill()
 })

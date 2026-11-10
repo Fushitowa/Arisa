@@ -469,6 +469,7 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
   // ── Start listening ───────────────────────────────────────────────────────
   const startListening = useCallback(async () => {
     if (orbStateRef.current === 'listening') return
+    if (desktopMode) window.arisaDesktop?.setVoiceState?.('starting')
     if (apiStatus === 'checking') {
       pendingListenRef.current = true
       setError('')
@@ -479,6 +480,7 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
       pendingListenRef.current = false
       setStatusHint('')
       setError('Add your Groq API key to finish setting up Arisa.')
+      if (desktopMode) window.arisaDesktop?.setVoiceState?.('idle')
       return
     }
     pendingListenRef.current = false
@@ -617,7 +619,7 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
       setOrbState('idle')
       setStatusHint('')
     }
-  }, [apiStatus, processAudio, stopRecording])
+  }, [apiStatus, desktopMode, processAudio, stopRecording])
 
   useEffect(() => {
     startListeningRef.current = startListening
@@ -861,6 +863,12 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
       if (orbStateRef.current === 'idle') startListening()
     })
   }, [desktopMode, startListening])
+
+  useEffect(() => {
+    if (!desktopMode) return
+    const voiceState = sessionOn && orbState === 'idle' ? 'session-idle' : orbState
+    window.arisaDesktop?.setVoiceState?.(voiceState)
+  }, [desktopMode, orbState, sessionOn])
 
   const sendText = async () => {
     const message = textInput.trim()

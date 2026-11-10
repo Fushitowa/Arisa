@@ -1,6 +1,9 @@
 const { contextBridge, ipcRenderer } = require('electron')
 
 contextBridge.exposeInMainWorld('arisaDesktop', {
+  setVoiceState(state) {
+    ipcRenderer.send('voice-state', state)
+  },
   onWake(callback) {
     const handler = () => callback()
     ipcRenderer.on('wake-detected', handler)
