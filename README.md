@@ -91,8 +91,7 @@ Arisa is configured as Ken’s single-user personal assistant: Ken is both the c
 
 ## Project Team
 
-- **Lead Developer — Ken (Fushitowa):** Led Arisa AI’s end-to-end development and technical direction, including repository maintenance, application architecture, the FastAPI backend and API, SQLite database, and Groq integration.
-- **Assistant Developer — Lisa (Lizz):** Provided AI-assisted development support for Arisa AI, contributing to frontend and backend implementation, feature refinement, debugging, and project documentation.
+- **Creator & Developer — Ken (Fushitowa):** Created and developed Arisa AI, guiding the project’s direction and handling its design, implementation, feature development, debugging, and maintenance across the frontend, FastAPI backend, SQLite database, and Groq integration.
 
 
 
