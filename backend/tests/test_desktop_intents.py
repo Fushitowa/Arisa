@@ -20,15 +20,15 @@ import main as backend  # noqa: E402
 
 
 class FakeCompletionClient:
-    def __init__(self, *, app_id: str | None = None, content: str = ""):
+    def __init__(self, *, app_id: str | None = None, action: str = "open", content: str = ""):
         if app_id is None:
             tool_calls = None
         else:
             tool_calls = [
                 types.SimpleNamespace(
                     function=types.SimpleNamespace(
-                        name="launch_desktop_application",
-                        arguments=json.dumps({"app_id": app_id}),
+                        name="manage_desktop_application",
+                        arguments=json.dumps({"action": action, "app_id": app_id}),
                     )
                 )
             ]
@@ -59,10 +59,88 @@ class DesktopIntentTests(unittest.TestCase):
         }
         for utterance, expected_app in cases.items():
             with self.subTest(utterance=utterance), patch.object(
-                backend, "launch_desktop_app", return_value="opened"
+                backend, "manage_desktop_app", return_value="opened"
             ) as launch:
                 self.assertEqual(backend.run_desktop_command(utterance), "opened")
-                launch.assert_called_once_with(expected_app)
+                launch.assert_called_once_with("open", expected_app)
+
+    def test_direct_open_and_close_commands_use_same_registered_aliases(self):
+        cases = [
+            ("Open Spotify", "open", "spotify"),
+            ("Open my music app", "open", "spotify"),
+            ("Please launch Google Chrome for me.", "open", "google_chrome"),
+            ("Arisa, close VS Code.", "close", "vs_code"),
+            ("Could you exit my browser", "close", None),
+            ("Shut down Steam", "close", "steam"),
+        ]
+        for utterance, expected_action, expected_app in cases:
+            with self.subTest(utterance=utterance):
+                if expected_app is None:
+                    self.assertIsNone(backend.run_desktop_command(utterance))
+                    continue
+                with patch.object(backend, "manage_desktop_app", return_value="handled") as manage:
+                    self.assertEqual(backend.run_desktop_command(utterance), "handled")
+                manage.assert_called_once_with(expected_action, expected_app)
+
+    def test_app_mentions_and_information_questions_are_not_action_intents(self):
+        for utterance in (
+            "I like Spotify.",
+            "What can you open?",
+            "How do I close Chrome?",
+            "Don't open Steam.",
+            "I closed Spotify yesterday.",
+        ):
+            with self.subTest(utterance=utterance):
+                self.assertIsNone(backend.run_desktop_command(utterance))
+        self.assertFalse(backend.desktop_action_is_requested("I like Spotify.", "open"))
+        self.assertFalse(backend.desktop_action_is_requested("What apps can you open?", "open"))
+        self.assertFalse(backend.desktop_action_is_requested("Don't open Steam.", "open"))
+        self.assertFalse(backend.desktop_action_is_requested("I can open Spotify, but I am only discussing it.", "open"))
+        self.assertFalse(backend.desktop_action_is_requested("How do I close Chrome?", "close"))
+        self.assertTrue(backend.desktop_action_is_requested("Please close Spotify.", "close"))
+        self.assertTrue(backend.desktop_action_is_requested("Would you mind closing Spotify?", "close"))
+        self.assertTrue(backend.desktop_action_is_requested("I don't need Spotify anymore. Close it.", "close"))
+
+    def test_skill_file_is_loaded_into_desktop_system_context(self):
+        self.assertTrue(backend.DESKTOP_SKILL_INSTRUCTIONS)
+        self.assertIn("Desktop Application Controller", backend.DESKTOP_SKILL_INSTRUCTIONS)
+        self.assertIn("Desktop Application Controller", backend.desktop_skill_context())
+
+    def test_close_sends_graceful_close_messages_and_verifies_windows(self):
+        with patch.object(backend.os, "name", "nt"), \
+             patch.object(backend, "_desktop_app_windows", side_effect=[[123, 456], []]), \
+             patch.object(backend, "_request_window_close", return_value=True) as request_close, \
+             patch.object(backend.time, "sleep"):
+            reply = backend.close_desktop_app("spotify")
+        self.assertEqual(reply, "The visible Spotify window(s) are closed.")
+        self.assertEqual(request_close.call_args_list, [unittest.mock.call(123), unittest.mock.call(456)])
+
+    def test_close_reports_not_running_without_sending_close_message(self):
+        with patch.object(backend.os, "name", "nt"), \
+             patch.object(backend, "_desktop_app_windows", return_value=[]), \
+             patch.object(backend, "_wait_for_desktop_process", return_value=False), \
+             patch.object(backend, "_request_window_close") as request_close:
+            reply = backend.close_desktop_app("discord")
+        self.assertEqual(reply, "Discord isn't currently running.")
+        request_close.assert_not_called()
+
+    def test_close_never_touches_browser_for_tiktok(self):
+        with patch.object(backend, "_desktop_app_windows") as inspect_windows:
+            reply = backend.close_desktop_app("tiktok")
+        self.assertIn("can't safely close it", reply)
+        inspect_windows.assert_not_called()
+
+    def test_untrusted_tool_arguments_are_type_checked(self):
+        self.assertIn("supported desktop app list", backend.manage_desktop_app("close", []))
+        self.assertIn("open or close", backend.manage_desktop_app({}, "spotify"))
+
+    def test_close_failure_is_reported_without_force_termination(self):
+        with patch.object(backend.os, "name", "nt"), \
+             patch.object(backend, "_desktop_app_windows", side_effect=[[789], [789]]), \
+             patch.object(backend, "_request_window_close", return_value=True), \
+             patch.object(backend.time, "monotonic", side_effect=[0.0, 4.0]):
+            reply = backend.close_desktop_app("notepad")
+        self.assertIn("unsaved-changes prompt", reply)
 
     def test_natural_language_tool_calls_execute_only_the_selected_app(self):
         cases = [
@@ -79,7 +157,7 @@ class DesktopIntentTests(unittest.TestCase):
             with self.subTest(utterance=utterance):
                 client = FakeCompletionClient(app_id=expected_app)
                 with patch.object(
-                    backend, "launch_desktop_app", return_value="App opened successfully."
+                    backend, "manage_desktop_app", return_value="App opened successfully."
                 ) as launch:
                     reply, did_launch = backend.create_assistant_reply(
                         client,
@@ -91,17 +169,85 @@ class DesktopIntentTests(unittest.TestCase):
                     )
                 self.assertEqual(reply, "App opened successfully.")
                 self.assertTrue(did_launch)
-                launch.assert_called_once_with(expected_app)
+                launch.assert_called_once_with("open", expected_app)
                 self.assertEqual(client.request["tool_choice"], "auto")
                 self.assertEqual(
                     client.request["tools"][0]["function"]["name"],
-                    "launch_desktop_application",
+                    "manage_desktop_application",
                 )
+
+    def test_natural_language_close_requests_call_graceful_close_tool(self):
+        cases = [
+            ("Arisa, close Spotify for me.", "spotify"),
+            ("Could you exit Google Chrome?", "google_chrome"),
+            ("I don't need Discord anymore. Please close it.", "discord"),
+            ("I want Visual Studio Code closed.", "vs_code"),
+        ]
+        for utterance, expected_app in cases:
+            with self.subTest(utterance=utterance):
+                client = FakeCompletionClient(app_id=expected_app, action="close")
+                with patch.object(backend, "manage_desktop_app", return_value=f"Closed {expected_app}.") as manage:
+                    reply, did_action = backend.create_assistant_reply(
+                        client,
+                        model="openai/gpt-oss-20b",
+                        messages=[{"role": "user", "content": utterance}],
+                        temperature=0,
+                        max_tokens=80,
+                        allow_desktop_actions=True,
+                    )
+                self.assertEqual(reply, f"Closed {expected_app}.")
+                self.assertTrue(did_action)
+                manage.assert_called_once_with("close", expected_app)
+
+    def test_streamed_voice_tool_supports_close_requests(self):
+        calls = {
+            0: {
+                "function": {
+                    "name": "manage_desktop_application",
+                    "arguments": json.dumps({"action": "close", "app_id": "discord"}),
+                }
+            }
+        }
+        with patch.object(backend, "manage_desktop_app", return_value="The visible Discord window(s) are closed.") as manage:
+            reply, did_action = backend._execute_streamed_desktop_tools(calls, "Arisa, close Discord.")
+        self.assertEqual(reply, "The visible Discord window(s) are closed.")
+        self.assertTrue(did_action)
+        manage.assert_called_once_with("close", "discord")
+
+    def test_close_browser_request_is_clarified_before_tool_execution(self):
+        client = FakeCompletionClient(app_id="google_chrome", action="close")
+        with patch.object(backend, "manage_desktop_app") as manage:
+            reply, did_action = backend.create_assistant_reply(
+                client,
+                model="openai/gpt-oss-20b",
+                messages=[{"role": "user", "content": "Could you close my browser?"}],
+                temperature=0,
+                max_tokens=80,
+                allow_desktop_actions=True,
+            )
+        self.assertEqual(reply, "Which browser do you mean, Chrome or Brave?")
+        self.assertFalse(did_action)
+        manage.assert_not_called()
+
+    def test_model_tool_call_without_clear_open_or_close_intent_is_rejected(self):
+        client = FakeCompletionClient(app_id="spotify", action="close")
+        with patch.object(backend, "manage_desktop_app") as manage:
+            reply, did_action = backend.create_assistant_reply(
+                client,
+                model="openai/gpt-oss-20b",
+                messages=[{"role": "user", "content": "I listen to Spotify every day."}],
+                temperature=0,
+                max_tokens=80,
+                allow_desktop_actions=True,
+            )
+        self.assertIn("haven't changed anything", reply)
+        self.assertFalse(did_action)
+        manage.assert_not_called()
 
     def test_app_mentions_without_a_launch_intent_do_not_execute(self):
         utterance = "Can you tell me whether Spotify has podcasts?"
         client = FakeCompletionClient(content="Yes, Spotify includes podcasts.")
-        with patch.object(backend, "launch_desktop_app") as launch:
+        with patch.object(backend, "manage_desktop_app") as launch:
             reply, did_launch = backend.create_assistant_reply(
                 client,
                 model="openai/gpt-oss-20b",
@@ -117,7 +263,7 @@ class DesktopIntentTests(unittest.TestCase):
     def test_ambiguous_browser_request_can_be_clarified_without_launching(self):
         # Even a mistaken model choice must not pick between the two browsers.
         client = FakeCompletionClient(app_id="google_chrome")
-        with patch.object(backend, "launch_desktop_app") as launch:
+        with patch.object(backend, "manage_desktop_app") as launch:
             reply, did_launch = backend.create_assistant_reply(
                 client,
                 model="openai/gpt-oss-20b",
@@ -132,7 +278,7 @@ class DesktopIntentTests(unittest.TestCase):
 
     def test_unapproved_tool_arguments_never_reach_the_launcher(self):
         client = FakeCompletionClient(app_id="powershell")
-        with patch.object(backend, "launch_desktop_app") as launch:
+        with patch.object(backend, "manage_desktop_app") as launch:
             reply, did_launch = backend.create_assistant_reply(
                 client,
                 model="openai/gpt-oss-20b",
@@ -141,7 +287,7 @@ class DesktopIntentTests(unittest.TestCase):
                 max_tokens=80,
                 allow_desktop_actions=True,
             )
-        self.assertIn("Which supported application", reply)
+        self.assertIn("supported desktop app list", reply)
         self.assertFalse(did_launch)
         launch.assert_not_called()
 
@@ -184,15 +330,17 @@ class LiveGroqDesktopIntentTests(unittest.TestCase):
             with self.subTest(utterance=utterance):
                 launched = []
 
-                def simulated_launch(app_id):
+                def simulated_launch(action, app_id):
+                    if action != "open":
+                        return f"Simulated close of {backend.DESKTOP_APPS[app_id]['label']}."
                     launched.append(app_id)
                     return f"Simulated launch of {backend.DESKTOP_APPS[app_id]['label']}."
 
                 messages = [
-                    {"role": "system", "content": backend.DESKTOP_ACTION_RULE},
+                    {"role": "system", "content": backend.desktop_skill_context()},
                     {"role": "user", "content": utterance},
                 ]
-                with patch.object(backend, "launch_desktop_app", side_effect=simulated_launch):
+                with patch.object(backend, "manage_desktop_app", side_effect=simulated_launch):
                     reply, did_launch = backend.create_assistant_reply(
                         self.client,
                         model="openai/gpt-oss-20b",

@@ -7,6 +7,7 @@ A personal Windows AI assistant built with React, Electron, and FastAPI. Arisa s
 - Voice and text conversations in a responsive desktop interface
 - Offline Vosk wake phrase detection
 - Natural language requests to launch a limited set of desktop applications
+- A loaded Desktop Application Controller skill for opening apps and gracefully closing visible app windows
 - SQLite storage for conversation history, memories, and tasks
 - Protected creator identity, kept separate from editable personal memories
 - PDF, TXT, and Markdown uploads with bounded document excerpts in chat context
@@ -74,9 +75,9 @@ Wake phrase detection stays local. During a conversation, voice messages use the
 
 ## Desktop App Launching
 
-Arisa can open Spotify, Brave, VLC media player, TikTok, Google Chrome, Steam, Discord, VS Code, Calculator, Notepad, and File Explorer from natural voice or text requests. She recognizes aliases such as Chrome, Visual Studio Code, and Explorer, and can infer Spotify from “my music app.” If you only ask for “my browser,” she asks whether you mean Chrome or Brave. TikTok opens in the default browser.
+Arisa can open or gracefully close visible windows for Spotify, Brave, VLC media player, Google Chrome, Steam, Discord, VS Code, Calculator, Notepad, and File Explorer through natural voice or text requests. She recognizes aliases such as Chrome, Visual Studio Code, and Explorer, and can infer Spotify from “my music app.” If you only ask for “my browser,” she asks whether you mean Chrome or Brave. TikTok opens in the default browser; Arisa will not close a browser window to close TikTok because that could disrupt unrelated tabs.
 
-Launching is limited to this allowlist. Arisa does not have general access to files, keyboard input, shell commands, or arbitrary applications. Windows verifies launches before Arisa gives a confirmation; if it cannot confirm an app opened, she does not claim that it did.
+Application control is limited to the allowlist. Arisa does not have general access to files, keyboard input, shell commands, force termination, or arbitrary applications. Windows verifies launches before Arisa gives a confirmation; if it cannot confirm an app opened, she does not claim that it did. Closing sends the app window a normal Windows close request and verifies whether visible windows closed. An app may show its own save prompt or remain running in the background; Arisa reports when closure cannot be confirmed.
 
 ## Build the Windows Installer
 

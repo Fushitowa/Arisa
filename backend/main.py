@@ -1,5 +1,6 @@
 import os
 import asyncio
+import ctypes
 import json
 import re
 import shutil
@@ -52,28 +53,69 @@ DESKTOP_APPS = {
     "notepad": {"name": "notepad", "label": "Notepad"},
     "file_explorer": {"name": "file explorer", "label": "File Explorer"},
 }
+DESKTOP_APP_ALIASES = {
+    "spotify": "spotify", "music app": "spotify", "my music app": "spotify",
+    "brave": "brave", "brave browser": "brave",
+    "vlc": "vlc_media_player", "vlc media player": "vlc_media_player",
+    "tiktok": "tiktok",
+    "chrome": "google_chrome", "google chrome": "google_chrome", "google browser": "google_chrome",
+    "steam": "steam", "discord": "discord",
+    "vscode": "vs_code", "vs code": "vs_code", "visual studio code": "vs_code", "code": "vs_code",
+    "calculator": "calculator", "notepad": "notepad",
+    "file explorer": "file_explorer", "explorer": "file_explorer",
+}
+DESKTOP_PROCESS_NAMES = {
+    "spotify": ("Spotify.exe",),
+    "brave": ("brave.exe",),
+    "vlc_media_player": ("vlc.exe",),
+    "google_chrome": ("chrome.exe",),
+    "steam": ("steam.exe",),
+    "discord": ("Discord.exe",),
+    "vs_code": ("Code.exe",),
+    "calculator": ("Calculator.exe", "CalculatorApp.exe", "calc.exe"),
+    "notepad": ("Notepad.exe",),
+    "file_explorer": ("explorer.exe",),
+}
+DESKTOP_SKILL_PATH = Path(__file__).parent / "skills" / "desktop-app-launcher" / "SKILL.md"
+
+
+def load_desktop_skill() -> str:
+    """Load the desktop-controller skill instructions from the shipped backend resources."""
+    try:
+        return DESKTOP_SKILL_PATH.read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        # Tool allowlists and argument validation remain enforced in code if documentation
+        # cannot be read; surface the packaging/integration problem in backend logs.
+        print(f"Desktop Application Controller skill could not be loaded: {exc}")
+        return ""
+
+
+DESKTOP_SKILL_INSTRUCTIONS = load_desktop_skill()
 DESKTOP_TOOL = {
     "type": "function",
     "function": {
-        "name": "launch_desktop_application",
+        "name": "manage_desktop_application",
         "description": (
-            "Open one supported Windows app only when the user's latest message clearly asks Arisa "
-            "to open, launch, start, or bring it up now. Understand polite, indirect, and conversational "
-            "requests. Spotify is the only supported music player, so 'my music app' can mean Spotify. "
-            "Chrome and Brave are both supported browsers; a generic 'my browser' request is ambiguous, "
-            "so ask which one instead of choosing. Never call this for an app that is merely mentioned, "
-            "a hypothetical, a question about how to open it, or a negated request."
+            "Open or gracefully close one supported Windows desktop application only when the user's "
+            "latest message clearly requests that operation. Understand natural language, but do not "
+            "act when an app is merely mentioned. Closing sends a normal window-close request and does "
+            "not force-terminate processes. TikTok opens in the browser and cannot be safely closed by this tool."
         ),
         "parameters": {
             "type": "object",
             "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["open", "close"],
+                    "description": "Whether the user clearly asked to open or close the application.",
+                },
                 "app_id": {
                     "type": "string",
                     "enum": list(DESKTOP_APPS),
-                    "description": "The exact ID of the supported app the user wants opened.",
+                    "description": "The exact ID of the supported app the user wants to manage.",
                 }
             },
-            "required": ["app_id"],
+            "required": ["action", "app_id"],
             "additionalProperties": False,
         },
     },
@@ -252,37 +294,24 @@ MEMORY_TRUTH_RULE = (
 
 
 def run_desktop_command(message: str) -> Optional[str]:
-    """Fast path for short, unambiguous commands; natural requests use the model tool."""
+    """Fast path for short, unambiguous open/close commands; longer requests use the model tool."""
+    alias_pattern = "|".join(
+        re.escape(alias).replace(r"\ ", r"\s+")
+        for alias in sorted(DESKTOP_APP_ALIASES, key=len, reverse=True)
+    )
     match = re.fullmatch(
-        r"\s*(?:(?:hey\s+)?arisa[, :]?\s+)?open\s+(?:the\s+)?"
-        r"(vlc\s+media\s+player|google\s+chrome|visual\s+studio\s+code|"
-        r"file\s+explorer|calculator|notepad|spotify|brave|vlc|tiktok|steam|"
-        r"discord|vscode|vs\s+code)(?:\s+app)?[.!?]*\s*",
+        rf"\s*(?:(?:hey\s+)?arisa[, :]?\s+)?(?:(?:can|could|would)\s+you\s+)?"
+        rf"(?:please\s+)?(open|launch|start|bring\s+up|close|exit|quit|shut\s+down|turn\s+off)\s+"
+        rf"(?:(?:the|my)\s+)?({alias_pattern})(?:\s+(?:app|for\s+me|now))?[.!?]*\s*",
         message,
         flags=re.IGNORECASE,
     )
     if not match:
         return None
-
-    spoken_name = re.sub(r"\s+", " ", match.group(1).lower())
-    app_id = {
-        "spotify": "spotify",
-        "brave": "brave",
-        "vlc": "vlc_media_player",
-        "vlc media player": "vlc_media_player",
-        "tiktok": "tiktok",
-        "chrome": "google_chrome",
-        "google chrome": "google_chrome",
-        "steam": "steam",
-        "discord": "discord",
-        "vscode": "vs_code",
-        "vs code": "vs_code",
-        "visual studio code": "vs_code",
-        "calculator": "calculator",
-        "notepad": "notepad",
-        "file explorer": "file_explorer",
-    }.get(spoken_name)
-    return launch_desktop_app(app_id) if app_id else None
+    action = "close" if match.group(1).lower() in {"close", "exit", "quit", "shut down", "turn off"} else "open"
+    spoken_name = re.sub(r"\s+", " ", match.group(2).lower())
+    app_id = DESKTOP_APP_ALIASES.get(spoken_name)
+    return manage_desktop_app(action, app_id) if app_id else None
 
 
 def _clear_desktop_launch_cooldown(app_id: str) -> None:
@@ -292,7 +321,7 @@ def _clear_desktop_launch_cooldown(app_id: str) -> None:
 
 def launch_desktop_app(app_id: str) -> Optional[str]:
     """Execute only a canonical app ID from the local allowlist."""
-    app = DESKTOP_APPS.get(app_id)
+    app = DESKTOP_APPS.get(app_id) if isinstance(app_id, str) else None
     if not app:
         return None
     app_name = app["name"]
@@ -325,18 +354,6 @@ def launch_desktop_app(app_id: str) -> Optional[str]:
         "calculator": (windows / "System32" / "calc.exe",),
         "notepad": (windows / "System32" / "notepad.exe",),
         "file explorer": (windows / "explorer.exe",),
-    }
-    process_names = {
-        "spotify": ("Spotify.exe",),
-        "brave": ("brave.exe",),
-        "vlc media player": ("vlc.exe",),
-        "google chrome": ("chrome.exe",),
-        "steam": ("steam.exe",),
-        "discord": ("Discord.exe",),
-        "vs code": ("Code.exe",),
-        "calculator": ("Calculator.exe", "CalculatorApp.exe", "calc.exe"),
-        "notepad": ("Notepad.exe",),
-        "file explorer": ("explorer.exe",),
     }
     try:
         if app_name == "tiktok":
@@ -380,7 +397,7 @@ def launch_desktop_app(app_id: str) -> Optional[str]:
         _clear_desktop_launch_cooldown(app_id)
         return f"I couldn't open {label}: {str(exc)[:180]}"
 
-    verified = _wait_for_desktop_process(process_names[app_name])
+    verified = _wait_for_desktop_process(DESKTOP_PROCESS_NAMES[app_id])
     if verified is True:
         return f"Sure, {label} is open."
     if verified is False:
@@ -426,21 +443,157 @@ def _wait_for_desktop_process(image_names: tuple[str, ...]) -> Optional[bool]:
         return None
 
 
+def _desktop_app_windows(app_id: str) -> Optional[list[int]]:
+    """Return visible top-level windows owned by the allowlisted app, or None if inspection failed."""
+    if os.name != "nt":
+        return None
+    app = DESKTOP_APPS.get(app_id)
+    image_names = {name.casefold() for name in DESKTOP_PROCESS_NAMES.get(app_id, ())}
+    if not app or not image_names:
+        return None
+
+    try:
+        from ctypes import wintypes
+
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        windows: list[int] = []
+        callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+        user32.IsWindowVisible.argtypes = [wintypes.HWND]
+        user32.IsWindowVisible.restype = wintypes.BOOL
+        user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+        user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+        user32.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+        user32.GetClassNameW.restype = ctypes.c_int
+        user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+        user32.GetWindowTextW.restype = ctypes.c_int
+        user32.EnumWindows.argtypes = [callback_type, wintypes.LPARAM]
+        user32.EnumWindows.restype = wintypes.BOOL
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.QueryFullProcessImageNameW.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD)]
+        kernel32.QueryFullProcessImageNameW.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+
+        def collect(hwnd, _lparam):
+            if not user32.IsWindowVisible(hwnd):
+                return True
+            if app_id == "file_explorer":
+                class_name = ctypes.create_unicode_buffer(128)
+                user32.GetClassNameW(hwnd, class_name, len(class_name))
+                if class_name.value.casefold() not in {"cabinetwclass", "explorewclass"}:
+                    return True
+
+            process_id = wintypes.DWORD()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(process_id))
+            handle = kernel32.OpenProcess(0x1000, False, process_id.value)  # PROCESS_QUERY_LIMITED_INFORMATION
+            if not handle:
+                return True
+            try:
+                image_path = ctypes.create_unicode_buffer(32768)
+                image_size = wintypes.DWORD(len(image_path))
+                if kernel32.QueryFullProcessImageNameW(handle, 0, image_path, ctypes.byref(image_size)):
+                    image_name = Path(image_path.value).name.casefold()
+                    if image_name in image_names:
+                        windows.append(int(hwnd))
+                    elif image_name == "applicationframehost.exe" and app_id in {"calculator", "notepad"}:
+                        # Packaged Windows apps may be hosted by ApplicationFrameHost.
+                        # Match only the requested app's own titled frame, never every host window.
+                        class_name = ctypes.create_unicode_buffer(128)
+                        user32.GetClassNameW(hwnd, class_name, len(class_name))
+                        if class_name.value.casefold() != "applicationframewindow":
+                            return True
+                        title = ctypes.create_unicode_buffer(512)
+                        user32.GetWindowTextW(hwnd, title, len(title))
+                        normalized_title = title.value.casefold()
+                        if (app_id == "calculator" and normalized_title == "calculator") or (
+                            app_id == "notepad" and "notepad" in normalized_title
+                        ):
+                            windows.append(int(hwnd))
+            finally:
+                kernel32.CloseHandle(handle)
+            return True
+
+        callback = callback_type(collect)
+        if not user32.EnumWindows(callback, 0):
+            return None
+        return windows
+    except (AttributeError, OSError, TypeError, ValueError):
+        return None
+
+
+def _request_window_close(hwnd: int) -> bool:
+    """Post the standard graceful Windows close message to an app window."""
+    from ctypes import wintypes
+
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+    user32.PostMessageW.restype = wintypes.BOOL
+    return bool(user32.PostMessageW(hwnd, 0x0010, 0, 0))  # WM_CLOSE
+
+
+def close_desktop_app(app_id: str) -> str:
+    """Gracefully request closure of visible windows owned by an allowlisted application."""
+    app = DESKTOP_APPS.get(app_id) if isinstance(app_id, str) else None
+    if not app:
+        return "I can only close applications that are registered in my supported app list."
+    label = app["label"]
+    if app_id == "tiktok":
+        return "TikTok is opened as a browser page, so I can't safely close it without affecting your other tabs."
+    if os.name != "nt":
+        return f"I can only close {label} from the Windows desktop app."
+
+    windows = _desktop_app_windows(app_id)
+    if windows is None:
+        return f"I couldn't safely inspect {label}'s windows, so I left it running."
+    if not windows:
+        running = _wait_for_desktop_process(DESKTOP_PROCESS_NAMES[app_id])
+        if running is False:
+            return f"{label} isn't currently running."
+        if running is True:
+            return f"{label} is running in the background, but has no visible window I can safely close."
+        return f"I couldn't verify whether {label} is running, so I left it alone."
+
+    sent = sum(_request_window_close(hwnd) for hwnd in windows)
+    if not sent:
+        return f"I couldn't send a normal close request to {label}. It may still be open."
+
+    deadline = time.monotonic() + 3.0
+    while time.monotonic() < deadline:
+        remaining = _desktop_app_windows(app_id)
+        if remaining is None:
+            return f"I sent a close request to {label}, but couldn't verify that its windows closed."
+        if not remaining:
+            return f"The visible {label} window(s) are closed."
+        time.sleep(0.15)
+    return f"I couldn't close {label}. It may have an unsaved-changes prompt or may still be open."
+
+
+def manage_desktop_app(action: str, app_id: Optional[str]) -> Optional[str]:
+    """Validate a requested operation and dispatch only to the supported app registry."""
+    if not isinstance(app_id, str) or app_id not in DESKTOP_APPS:
+        return "That application isn't in my supported desktop app list."
+    if not isinstance(action, str):
+        return "Should I open or close the supported application?"
+    if action == "open":
+        return launch_desktop_app(app_id)
+    if action == "close":
+        return close_desktop_app(app_id)
+    return "I can only open or close a supported desktop application."
+
+
 DESKTOP_ACTION_RULE = (
-    "This Windows desktop app can launch only Spotify, Brave, VLC media player, TikTok in the default "
-    "browser, Google Chrome, Steam, Discord, VS Code, Calculator, Notepad, and File Explorer. "
-    "For the user's latest message, use natural-language understanding to decide whether Ken clearly "
-    "wants one of these apps opened, launched, started, or brought up now; polite and indirect requests count. A supported app being "
-    "mentioned is not enough. Do not act on hypotheticals, questions asking for information, or "
-    "negated/conditional requests. If the target is generic or ambiguous, ask which app he means "
-    "instead of guessing. 'My music app' can mean Spotify because it is the only supported music player; "
-    "'my browser' is ambiguous between Chrome and Brave. Unsupported apps must not be launched. "
-    "Recognize Chrome as Google Chrome, Visual Studio Code as VS Code, Explorer as File Explorer, "
-    "and VLC as VLC media player. "
-    "You may request the launch_desktop_application tool only for a clear, supported request. "
-    "Never claim an app opened unless the application code returns a launch result. Arisa has no "
-    "general access to files, keyboard input, shell commands, or arbitrary applications."
+    "The Desktop Application Controller skill above applies to requests to open or close apps. "
+    "The backend allowlist and tool argument validation are authoritative. Use only the "
+    "manage_desktop_application tool for clear supported requests; never use shell commands, "
+    "force termination, or arbitrary process access. Report only the result returned by the tool."
 )
+
+
+def desktop_skill_context() -> str:
+    """Return loaded skill instructions alongside non-negotiable backend safety rules."""
+    return "\n\n".join(part for part in (DESKTOP_SKILL_INSTRUCTIONS, DESKTOP_ACTION_RULE) if part)
 
 
 def clarify_ambiguous_desktop_target(message: str, app_ids: list[str]) -> Optional[str]:
@@ -452,6 +605,43 @@ def clarify_ambiguous_desktop_target(message: str, app_ids: list[str]) -> Option
     if selected_browsers and names_a_browser and not names_specific_browser:
         return "Which browser do you mean, Chrome or Brave?"
     return None
+
+
+def desktop_action_is_requested(message: str, action: str) -> bool:
+    """Require an explicit, non-negated operation phrase before executing a model tool call."""
+    verbs = {
+        "open": r"open(?:ing)?|launch(?:ing)?|start(?:ing)?|bring\s+up|pull\s+up",
+        "close": r"close|closing|exit|exiting|quit|quitting|shut\s+down|shutting\s+down|turn\s+off|turning\s+off",
+    }.get(action)
+    if not verbs:
+        return False
+    text = message.casefold()
+    if re.match(r"\s*(?:what|which|how|why|when|where|whether)\b", text):
+        return False
+
+    for match in re.finditer(rf"\b(?:{verbs})\b", text):
+        clause_prefix = re.split(r"[.!?;,]", text[:match.start()])[-1]
+        if re.search(r"\b(?:don't|do not|never|not|cannot|can't|avoid)(?:\W+\w+){0,3}\W*$", clause_prefix):
+            continue
+        if re.search(r"\b(?:if|suppose|imagine|hypothetically|how to|whether)\b", clause_prefix):
+            continue
+        if re.search(r"\b(?:what|which|how|why|when|where)\b", clause_prefix):
+            continue
+        request_prefix = re.sub(r"^\s*(?:(?:hey\s+)?arisa)\s*[, :]?\s*", "", clause_prefix).strip()
+        if re.fullmatch(
+            r"(?:(?:please\s+)?(?:can|could|would)\s+you(?:\s+please)?|please|how\s+about\s+you|"
+            r"would\s+you\s+mind|(?:i think\s+)?i want to|i need to|i'd like to|i would like to|"
+            r"i want you to|i need you to|i'd like you to|i would like you to)?",
+            request_prefix,
+        ):
+            return True
+
+    # Common indirect but explicit user intentions.
+    if action == "open" and re.search(r"\b(?:i want|i need|i'd like|i would like) to (?:use|work in)\b", text):
+        return True
+    if action == "close" and re.search(r"\b(?:i want|i need)\b.{0,40}\b(?:closed|shut down)\b", text):
+        return True
+    return False
 
 
 def _continuation_messages(messages: list[dict], partial_reply: str) -> list[dict]:
@@ -519,30 +709,42 @@ def create_assistant_reply(
     tool_calls = getattr(assistant_message, "tool_calls", None) or []
     if tool_calls and allow_desktop_actions:
         requested_apps = []
+        requested_actions_by_app = {}
         for tool_call in tool_calls:
             function = getattr(tool_call, "function", None)
-            if getattr(function, "name", None) != "launch_desktop_application":
-                return "Which supported application would you like me to open?", False
+            if getattr(function, "name", None) != "manage_desktop_application":
+                return "Which supported application would you like me to manage?", False
             try:
                 arguments = json.loads(function.arguments)
             except (TypeError, ValueError):
-                return "Which supported application would you like me to open?", False
+                return "Which supported application would you like me to manage?", False
             app_id = arguments.get("app_id") if isinstance(arguments, dict) else None
-            if app_id not in DESKTOP_APPS:
-                return "Which supported application would you like me to open?", False
-            if app_id not in requested_apps:
-                requested_apps.append(app_id)
+            action = arguments.get("action") if isinstance(arguments, dict) else None
+            if not isinstance(app_id, str) or app_id not in DESKTOP_APPS:
+                return "That application isn't in my supported desktop app list.", False
+            if not isinstance(action, str) or action not in {"open", "close"}:
+                return "Should I open or close the supported application?", False
+            latest_user_message = next(
+                (item["content"] for item in reversed(messages) if item.get("role") == "user"),
+                "",
+            )
+            if not desktop_action_is_requested(latest_user_message, action):
+                return "I haven't changed anything. Were you asking me to open or close a supported app?", False
+            previous_action = requested_actions_by_app.get(app_id)
+            if previous_action and previous_action != action:
+                return f"Do you want me to open or close {DESKTOP_APPS[app_id]['label']}?", False
+            requested_actions_by_app[app_id] = action
+            operation = (action, app_id)
+            if operation not in requested_apps:
+                requested_apps.append(operation)
 
         if not requested_apps or len(requested_apps) > 3:
             return "Please tell me which one supported application you want opened first.", False
-        latest_user_message = next(
-            (item["content"] for item in reversed(messages) if item.get("role") == "user"),
-            "",
-        )
-        clarification = clarify_ambiguous_desktop_target(latest_user_message, requested_apps)
+        latest_user_message = next((item["content"] for item in reversed(messages) if item.get("role") == "user"), "")
+        clarification = clarify_ambiguous_desktop_target(latest_user_message, [app_id for _, app_id in requested_apps])
         if clarification:
             return clarification, False
-        results = [launch_desktop_app(app_id) for app_id in requested_apps]
+        results = [manage_desktop_app(action, app_id) for action, app_id in requested_apps]
         return " ".join(result for result in results if result), True
 
     if getattr(choice, "finish_reason", None) == "length" and accumulated_reply:
@@ -608,26 +810,37 @@ def _next_voice_speech_boundary(text: str, *, has_spoken: bool) -> Optional[int]
 
 def _execute_streamed_desktop_tools(tool_calls: dict, user_text: str) -> tuple[str, bool]:
     requested_apps = []
+    requested_actions_by_app = {}
     for call in tool_calls.values():
         function = call.get("function", {})
-        if function.get("name") != "launch_desktop_application":
-            return "Which supported application would you like me to open?", False
+        if function.get("name") != "manage_desktop_application":
+            return "Which supported application would you like me to manage?", False
         try:
             arguments = json.loads(function.get("arguments", "{}"))
         except (TypeError, ValueError):
-            return "Which supported application would you like me to open?", False
+            return "Which supported application would you like me to manage?", False
         app_id = arguments.get("app_id") if isinstance(arguments, dict) else None
-        if app_id not in DESKTOP_APPS:
-            return "Which supported application would you like me to open?", False
-        if app_id not in requested_apps:
-            requested_apps.append(app_id)
+        action = arguments.get("action") if isinstance(arguments, dict) else None
+        if not isinstance(app_id, str) or app_id not in DESKTOP_APPS:
+            return "That application isn't in my supported desktop app list.", False
+        if not isinstance(action, str) or action not in {"open", "close"}:
+            return "Should I open or close the supported application?", False
+        if not desktop_action_is_requested(user_text, action):
+            return "I haven't changed anything. Were you asking me to open or close a supported app?", False
+        previous_action = requested_actions_by_app.get(app_id)
+        if previous_action and previous_action != action:
+            return f"Do you want me to open or close {DESKTOP_APPS[app_id]['label']}?", False
+        requested_actions_by_app[app_id] = action
+        operation = (action, app_id)
+        if operation not in requested_apps:
+            requested_apps.append(operation)
 
     if not requested_apps or len(requested_apps) > 3:
         return "Please tell me which one supported application you want opened first.", False
-    clarification = clarify_ambiguous_desktop_target(user_text, requested_apps)
+    clarification = clarify_ambiguous_desktop_target(user_text, [app_id for _, app_id in requested_apps])
     if clarification:
         return clarification, False
-    return " ".join(launch_desktop_app(app_id) for app_id in requested_apps), True
+    return " ".join(manage_desktop_app(action, app_id) for action, app_id in requested_apps), True
 
 
 async def _stream_voice_reply(
@@ -883,7 +1096,7 @@ def chat(body: ChatRequest):
                 + "\n\n"
                 + MEMORY_TRUTH_RULE
                 + "\n\n"
-                + DESKTOP_ACTION_RULE
+                + desktop_skill_context()
                 + "\n\n"
                 + memory_context(conn, body.message)
             )
@@ -1353,7 +1566,7 @@ async def voice_chat(
                 conn.commit()
 
             sys_ctx = voice_system_context(conn, user_text)
-            sys_ctx += "\n\n" + DESKTOP_ACTION_RULE
+            sys_ctx += "\n\n" + desktop_skill_context()
             action_result = run_desktop_command(user_text) if desktop_mode else None
             if action_result:
                 sys_ctx += "\n\nDesktop action result: " + action_result
