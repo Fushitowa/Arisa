@@ -1,5 +1,5 @@
 ---
-name: Desktop Application Controller
+name: desktop-app-launcher
 description: Open supported desktop apps or gracefully close their visible windows on a clear user request.
 ---
 
