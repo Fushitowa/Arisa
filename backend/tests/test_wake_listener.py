@@ -3,7 +3,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from wake_listener import AUTHORIZED_WAKE_PHRASES, is_authorized_wake_result, normalize_wake_text
+from wake_listener import AUTHORIZED_WAKE_PHRASES, audio_frame_bytes, is_authorized_wake_result, normalize_wake_text
 
 
 def result(text, confidence=0.9):
@@ -15,6 +15,10 @@ def result(text, confidence=0.9):
 
 
 class WakePhraseTests(unittest.TestCase):
+    def test_audio_frames_are_converted_to_vosk_compatible_bytes(self):
+        self.assertEqual(audio_frame_bytes(bytearray(b"pcm")), b"pcm")
+        self.assertEqual(audio_frame_bytes(memoryview(b"pcm")), b"pcm")
+
     def test_only_three_authorized_phrases_are_configured(self):
         self.assertEqual(AUTHORIZED_WAKE_PHRASES, {
             "wake up arisa",

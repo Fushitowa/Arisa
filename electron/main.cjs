@@ -127,6 +127,16 @@ function shouldListenForWake() {
     && (!windowRef || windowRef.isDestroyed() || !windowRef.isVisible() || voiceUiState === 'idle')
 }
 
+function startupOptions() {
+  return { path: process.execPath, args: dev ? [root, '--hidden'] : ['--hidden'] }
+}
+
+function getStartupSettings() {
+  // Windows identifies an app login item by its executable and arguments.
+  // Query using the same tuple passed to setLoginItemSettings.
+  return app.getLoginItemSettings(startupOptions())
+}
+
 function getWakeStatus() {
   let state = 'stopped'
   if (!listenerEnabled) state = 'disabled'
@@ -139,7 +149,7 @@ function getWakeStatus() {
 
   return {
     enabled: listenerEnabled,
-    runAtLogin: app.isReady() && app.getLoginItemSettings().openAtLogin,
+    runAtLogin: app.isReady() && getStartupSettings().openAtLogin,
     state,
     error: listenerError,
     startupError,
@@ -291,7 +301,7 @@ function showWindow() {
 
 function refreshTrayMenu() {
   if (!tray) return
-  const startup = app.getLoginItemSettings().openAtLogin
+  const startup = getStartupSettings().openAtLogin
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: 'Open Arisa AI', click: showWindow },
     { label: 'Voice activation (Wake up Arisa / Arisa open / I need you Arisa)', type: 'checkbox', checked: listenerEnabled, click: item => {
@@ -307,8 +317,7 @@ function refreshTrayMenu() {
 }
 
 function setStartup(enabled) {
-  const args = dev ? [root, '--hidden'] : ['--hidden']
-  app.setLoginItemSettings({ openAtLogin: enabled, path: process.execPath, args })
+  app.setLoginItemSettings({ ...startupOptions(), openAtLogin: enabled })
 }
 
 function setVoiceActivation(enabled) {
@@ -327,7 +336,7 @@ function setVoiceActivation(enabled) {
 
 function setWindowsStartup(enabled) {
   setStartup(enabled === true)
-  const registered = app.getLoginItemSettings().openAtLogin
+  const registered = getStartupSettings().openAtLogin
   saveSettings({ runAtLoginEnabled: registered })
   startupError = registered === (enabled === true)
     ? ''
@@ -397,7 +406,7 @@ app.whenReady().then(async () => {
   // actual OS registration so voice activation starts after future sign-ins.
   const runAtLoginEnabled = settings.runAtLoginEnabled !== false
   setStartup(runAtLoginEnabled)
-  const startupRegistered = app.getLoginItemSettings().openAtLogin
+  const startupRegistered = getStartupSettings().openAtLogin
   saveSettings({ runAtLoginEnabled: startupRegistered })
   startupError = runAtLoginEnabled && !startupRegistered
     ? 'Windows did not register Arisa to start at sign-in.'

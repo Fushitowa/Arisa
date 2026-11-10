@@ -52,6 +52,11 @@ def is_authorized_wake_result(result: dict, min_confidence: float = MIN_WORD_CON
         return False
 
 
+def audio_frame_bytes(audio: object) -> bytes:
+    """Convert sounddevice's CFFI-backed raw frame into Vosk-compatible bytes."""
+    return bytes(audio)
+
+
 def ensure_model() -> Path:
     model_path = MODEL_DIR / MODEL_NAME
     if (model_path / "am").is_dir():
@@ -105,7 +110,7 @@ def run_listener(sd, KaldiRecognizer, Model) -> None:
             audio, overflowed = stream.read(4000)
             if overflowed:
                 continue
-            if recognizer.AcceptWaveform(audio):
+            if recognizer.AcceptWaveform(audio_frame_bytes(audio)):
                 result = json.loads(recognizer.Result())
                 if is_authorized_wake_result(result) and time.monotonic() - last_wake > 4:
                     last_wake = time.monotonic()
