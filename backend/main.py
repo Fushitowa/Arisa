@@ -33,6 +33,7 @@ MAX_RESPONSE_CONTINUATIONS = 3
 if WHISPER_MODEL == "whisper-large-v3":
     WHISPER_MODEL = "whisper-large-v3-turbo"
 MAX_VOICE_UPLOAD = 25 * 1024 * 1024
+INTERRUPTION_KEYWORDS = {"stop", "enough", "wait"}
 # Older setup guides used Llama 3.3, which Groq deprecated in August 2026.
 if MODEL in {"llama-3.3-70b-versatile", "llama-3.1-8b-instant"}:
     MODEL = "openai/gpt-oss-120b"
@@ -1199,7 +1200,15 @@ async def _elevenlabs_audio_stream(text: str):
 
 # ── /api/arisa/voice — transcribe + LLM response ─────────────────────────────
 
-async def _transcribe_upload(file: UploadFile, client, *, async_client: bool = False) -> str:
+async def _transcribe_upload(
+    file: UploadFile,
+    client,
+    *,
+    async_client: bool = False,
+    response_format: str = "text",
+    language: Optional[str] = None,
+    prompt: Optional[str] = None,
+):
     audio_bytes = await file.read(MAX_VOICE_UPLOAD + 1)
     if not audio_bytes:
         raise HTTPException(400, "Empty audio received.")
@@ -1218,14 +1227,75 @@ async def _transcribe_upload(file: UploadFile, client, *, async_client: bool = F
     ext = ext_map.get(content_type)
     if not ext:
         raise HTTPException(415, f"Unsupported voice audio format: {content_type or 'unknown'}.")
-    transcription = client.audio.transcriptions.create(
-        model=WHISPER_MODEL,
-        file=(f"voice{ext}", audio_bytes, content_type),
-        response_format="text",
-        prompt="The speaker is talking to Arisa AI. Names may include Arisa and Ken.",
-    )
+    transcription_args = {
+        "model": WHISPER_MODEL,
+        "file": (f"voice{ext}", audio_bytes, content_type),
+        "response_format": response_format,
+        "prompt": prompt or "The speaker is talking to Arisa AI. Names may include Arisa and Ken.",
+    }
+    if language:
+        transcription_args["language"] = language
+    transcription = client.audio.transcriptions.create(**transcription_args)
     raw_transcription = await transcription if async_client else transcription
+    if response_format == "verbose_json":
+        return raw_transcription
     return (raw_transcription if isinstance(raw_transcription, str) else raw_transcription.text).strip()
+
+
+def authorized_interruption_keyword(transcript: str) -> Optional[str]:
+    """Accept only utterances made entirely from the three explicit interruption words."""
+    words = re.findall(r"[a-z]+", (transcript or "").casefold())
+    if words and all(word in INTERRUPTION_KEYWORDS for word in words):
+        return words[0]
+    return None
+
+
+def confident_interruption_keyword(transcription) -> Optional[str]:
+    """Reject missing or low-confidence STT metadata before accepting an interruption."""
+    segments = getattr(transcription, "segments", None) or []
+    if not segments:
+        return None
+    for segment in segments:
+        if isinstance(segment, dict):
+            avg_logprob = segment.get("avg_logprob")
+            no_speech_prob = segment.get("no_speech_prob")
+        else:
+            avg_logprob = getattr(segment, "avg_logprob", None)
+            no_speech_prob = getattr(segment, "no_speech_prob", None)
+        if avg_logprob is None or no_speech_prob is None:
+            return None
+        if avg_logprob < -0.5 or no_speech_prob > 0.2:
+            return None
+    return authorized_interruption_keyword(getattr(transcription, "text", ""))
+
+
+@app.post("/api/arisa/interrupt-keyword")
+async def transcribe_interruption_keyword(file: UploadFile = File(...)):
+    """Transcribe a short barge-in clip and return a keyword only for exact commands."""
+    api_key = os.getenv("GROQ_API_KEY")
+    if not api_key:
+        raise HTTPException(503, "Groq is not configured.")
+    from groq import AsyncGroq
+    client = AsyncGroq(api_key=api_key, timeout=20.0)
+    try:
+        transcription = await _transcribe_upload(
+            file,
+            client,
+            async_client=True,
+            response_format="verbose_json",
+            language="en",
+            prompt="Transcribe the spoken words exactly. Do not infer words that are unclear.",
+        )
+        return {"keyword": confident_interruption_keyword(transcription)}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(502, f"Interruption speech recognition failed: {str(exc)[:180]}") from exc
+    finally:
+        try:
+            await client.close()
+        except Exception:
+            pass
 
 
 @app.post("/api/arisa/voice")

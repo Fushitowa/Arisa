@@ -10,7 +10,7 @@ import types
 import unittest
 from contextlib import contextmanager
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from dotenv import dotenv_values
 
@@ -127,6 +127,77 @@ class FakeSyncClient:
 
 
 class VoiceGenerationTests(unittest.TestCase):
+    def test_only_standalone_authorized_interruption_words_pass_the_gate(self):
+        authorized = {
+            "STOP": "stop",
+            "Stop.": "stop",
+            "enough!": "enough",
+            "WAIT?": "wait",
+            "Stop stop": "stop",
+            "WAIT, enough.": "wait",
+        }
+        rejected = [
+            "Hello", "Okay", "Yes", "No", "Really?", "What?", "I understand",
+            "Please stop", "Wait a moment", "I said enough", "stoplight", "unclear speech",
+        ]
+        for phrase, expected in authorized.items():
+            with self.subTest(phrase=phrase):
+                self.assertEqual(backend.authorized_interruption_keyword(phrase), expected)
+        for phrase in rejected:
+            with self.subTest(phrase=phrase):
+                self.assertIsNone(backend.authorized_interruption_keyword(phrase))
+
+    def test_keyword_requires_confident_speech_recognition_metadata(self):
+        confident = types.SimpleNamespace(
+            text="STOP.",
+            segments=[types.SimpleNamespace(avg_logprob=-0.12, no_speech_prob=0.01)],
+        )
+        uncertain = types.SimpleNamespace(
+            text="wait",
+            segments=[types.SimpleNamespace(avg_logprob=-0.72, no_speech_prob=0.03)],
+        )
+        likely_noise = types.SimpleNamespace(
+            text="enough",
+            segments=[types.SimpleNamespace(avg_logprob=-0.1, no_speech_prob=0.65)],
+        )
+        missing_metadata = types.SimpleNamespace(text="wait", segments=[])
+        longer_phrase = types.SimpleNamespace(
+            text="Wait a minute",
+            segments=[types.SimpleNamespace(avg_logprob=-0.1, no_speech_prob=0.02)],
+        )
+        self.assertEqual(backend.confident_interruption_keyword(confident), "stop")
+        for result in (uncertain, likely_noise, missing_metadata, longer_phrase):
+            with self.subTest(result=result):
+                self.assertIsNone(backend.confident_interruption_keyword(result))
+
+    def test_keyword_endpoint_uses_verbose_recognition_and_returns_only_the_gate_result(self):
+        client_instances = []
+
+        class FakeAsyncGroq:
+            def __init__(self, **_options):
+                self.closed = False
+                client_instances.append(self)
+
+            async def close(self):
+                self.closed = True
+
+        transcript = types.SimpleNamespace(
+            text="Enough!",
+            segments=[types.SimpleNamespace(avg_logprob=-0.1, no_speech_prob=0.01)],
+        )
+        transcribe = AsyncMock(return_value=transcript)
+        with (
+            patch.dict(os.environ, {"GROQ_API_KEY": "test-key-only"}),
+            patch.dict("sys.modules", {"groq": types.SimpleNamespace(AsyncGroq=FakeAsyncGroq)}),
+            patch.object(backend, "_transcribe_upload", transcribe),
+        ):
+            result = asyncio.run(backend.transcribe_interruption_keyword(types.SimpleNamespace()))
+        self.assertEqual(result, {"keyword": "enough"})
+        self.assertEqual(transcribe.await_args.kwargs["response_format"], "verbose_json")
+        self.assertEqual(transcribe.await_args.kwargs["language"], "en")
+        self.assertIn("Do not infer", transcribe.await_args.kwargs["prompt"])
+        self.assertTrue(client_instances[0].closed)
+
     def test_short_reply_finishes_and_emits_a_done_event(self):
         reply = "Sure, I can help with that."
         events = collect_events(FakeAsyncClient([AsyncStream([model_chunk(reply, "stop")])]))

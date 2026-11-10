@@ -8,6 +8,16 @@ const SPEECH_START_MS  = 150  // Reject brief clicks while arming quickly
 const VAD_CALIBRATION_MS = 300 // Establish the room's noise level before adapting the voice gate
 const MAX_RECORD_MS    = 300000 // Safety limit for an unattended recording (5 minutes)
 const MIN_BLOB_BYTES   = 1500  // Ignore clicks while retaining short, quiet utterances
+const INTERRUPTION_KEYWORDS = new Set(['stop', 'enough', 'wait'])
+const INTERRUPTION_SILENCE_MS = 500
+const INTERRUPTION_CALIBRATION_MS = 120
+const INTERRUPTION_MAX_UTTERANCE_MS = 2200
+const INTERRUPTION_MIN_BLOB_BYTES = 650
+
+function normalizeInterruptionKeyword(text = '') {
+  const words = String(text).normalize('NFKC').toLowerCase().match(/[a-z]+/g) || []
+  return words.length && words.every(word => INTERRUPTION_KEYWORDS.has(word)) ? words[0] : null
+}
 
 async function readApiResult(response, label) {
   const body = await response.text()
@@ -99,6 +109,15 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
   const chunksRef      = useRef([])
   const speechPlaybackRef = useRef(null)
   const streamedReplyCancelRef = useRef(null)
+  const interruptionGenerationRef = useRef(0)
+  const interruptionStreamRef = useRef(null)
+  const interruptionContextRef = useRef(null)
+  const interruptionAnalyserRef = useRef(null)
+  const interruptionRafRef = useRef(null)
+  const interruptionRecorderRef = useRef(null)
+  const interruptionRequestRef = useRef(null)
+  const interruptionInFlightRef = useRef(false)
+  const interruptionTriggeredRef = useRef(false)
   const startListeningRef = useRef(null)
   const pendingListenRef = useRef(false)
   const streamRef      = useRef(null)
@@ -603,6 +622,226 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
   useEffect(() => {
     startListeningRef.current = startListening
   }, [startListening])
+
+  // Voice activity only opens a short STT check. It never stops playback unless
+  // the complete transcription consists only of authorized interruption words.
+  useEffect(() => {
+    if (orbState !== 'speaking' || !sessionOn) return
+
+    const generation = ++interruptionGenerationRef.current
+    let disposed = false
+    let stream = null
+    let context = null
+    let analyser = null
+    let source = null
+    let highPass = null
+    let lowPass = null
+    let activeRecorder = null
+    let captureChunks = []
+    let captureStartedAt = 0
+    let hasSpeech = false
+    let speechStartedAt = 0
+    let silenceStartedAt = 0
+    let discardUntilSilence = false
+    let noiseFloor = 0.003
+    let noiseSamples = []
+    const startedAt = Date.now()
+    const timeBuffer = new Float32Array(1024)
+
+    const current = () => !disposed && generation === interruptionGenerationRef.current
+    const cleanup = () => {
+      if (disposed) return
+      disposed = true
+      if (generation === interruptionGenerationRef.current) interruptionGenerationRef.current += 1
+      if (interruptionRafRef.current) cancelAnimationFrame(interruptionRafRef.current)
+      interruptionRafRef.current = null
+      interruptionRequestRef.current?.abort()
+      interruptionRequestRef.current = null
+      if (activeRecorder?.state === 'recording') {
+        activeRecorder.onstop = null
+        try { activeRecorder.stop() } catch {}
+      }
+      if (interruptionRecorderRef.current === activeRecorder) interruptionRecorderRef.current = null
+      stream?.getTracks().forEach(track => track.stop())
+      if (interruptionStreamRef.current === stream) interruptionStreamRef.current = null
+      try { source?.disconnect() } catch {}
+      try { highPass?.disconnect() } catch {}
+      try { lowPass?.disconnect() } catch {}
+      if (context && context.state !== 'closed') context.close().catch(() => {})
+      if (interruptionContextRef.current === context) interruptionContextRef.current = null
+      interruptionAnalyserRef.current = null
+      interruptionInFlightRef.current = false
+    }
+
+    const transcribeCapture = async (blob, recorderGeneration) => {
+      if (!current() || blob.size < INTERRUPTION_MIN_BLOB_BYTES) {
+        interruptionInFlightRef.current = false
+        return
+      }
+      const controller = new AbortController()
+      interruptionRequestRef.current = controller
+      try {
+        const form = new FormData()
+        form.append('file', blob, 'interruption.webm')
+        const response = await fetch(`${API}/arisa/interrupt-keyword`, {
+          method: 'POST', body: form, signal: controller.signal,
+        })
+        if (!response.ok) return
+        const result = await response.json()
+        const keyword = normalizeInterruptionKeyword(result.keyword || '')
+        if (
+          keyword && current() && recorderGeneration === interruptionGenerationRef.current &&
+          sessionRef.current && orbStateRef.current === 'speaking' && !interruptionTriggeredRef.current
+        ) {
+          interruptionTriggeredRef.current = true
+          cleanup()
+          cancelSpeechPlayback()
+          const voiceContext = audioCtxRef.current
+          audioCtxRef.current = null
+          if (voiceContext && voiceContext.state !== 'closed') voiceContext.close().catch(() => {})
+          setStatusHint('Interrupted — listening…')
+          setOrbState('idle')
+          setTimeout(() => {
+            if (sessionRef.current) startListeningRef.current?.()
+          }, 120)
+        }
+      } catch {
+        // Network or recognition uncertainty must leave the current speech alone.
+      } finally {
+        if (interruptionRequestRef.current === controller) interruptionRequestRef.current = null
+        if (current()) interruptionInFlightRef.current = false
+      }
+    }
+
+    const startCapture = () => {
+      if (!stream || activeRecorder || interruptionInFlightRef.current) return
+      try {
+        const mime = getSupportedMimeType()
+        const recorder = new MediaRecorder(stream, mime ? { mimeType: mime } : {})
+        activeRecorder = recorder
+        interruptionRecorderRef.current = recorder
+        captureChunks = []
+        recorder.ondataavailable = event => {
+          if (event.data?.size) captureChunks.push(event.data)
+        }
+        recorder.onstop = () => {
+          if (interruptionRecorderRef.current === recorder) interruptionRecorderRef.current = null
+          if (activeRecorder === recorder) activeRecorder = null
+          if (discardUntilSilence || !current()) {
+            interruptionInFlightRef.current = false
+            return
+          }
+          const blob = new Blob(captureChunks, { type: mime || 'audio/webm' })
+          void transcribeCapture(blob, generation)
+        }
+        captureStartedAt = Date.now()
+        recorder.start(100)
+      } catch {
+        interruptionInFlightRef.current = false
+      }
+    }
+
+    const tick = () => {
+      if (!current()) return
+      if (!sessionRef.current || orbStateRef.current !== 'speaking') {
+        cleanup()
+        return
+      }
+      if (!analyser) return
+      analyser.getFloatTimeDomainData(timeBuffer)
+      let energy = 0
+      for (const sample of timeBuffer) energy += sample * sample
+      const rms = Math.sqrt(energy / timeBuffer.length)
+      const now = Date.now()
+      const threshold = Math.max(0.007, noiseFloor * 1.8)
+
+      if (interruptionInFlightRef.current) {
+        interruptionRafRef.current = requestAnimationFrame(tick)
+        return
+      }
+
+      if (discardUntilSilence) {
+        if (rms < threshold * 0.7) {
+          silenceStartedAt ||= now
+          if (now - silenceStartedAt >= INTERRUPTION_SILENCE_MS) {
+            discardUntilSilence = false
+            hasSpeech = false
+            silenceStartedAt = 0
+          }
+        } else silenceStartedAt = 0
+      } else if (!hasSpeech) {
+        if (now - startedAt < INTERRUPTION_CALIBRATION_MS) {
+          noiseSamples.push(rms)
+          if (noiseSamples.length > 45) noiseSamples.shift()
+          const ordered = [...noiseSamples].sort((a, b) => a - b)
+          if (ordered.length) noiseFloor = ordered[Math.floor((ordered.length - 1) * 0.2)]
+        } else if (rms >= threshold) {
+          speechStartedAt ||= now
+          if (now - speechStartedAt >= 75) {
+            hasSpeech = true
+            silenceStartedAt = 0
+            startCapture()
+          }
+        } else speechStartedAt = 0
+      } else if (now - captureStartedAt >= INTERRUPTION_MAX_UTTERANCE_MS) {
+        discardUntilSilence = true
+        interruptionInFlightRef.current = true
+        if (activeRecorder?.state === 'recording') activeRecorder.stop()
+      } else if (rms < threshold * 0.7) {
+        silenceStartedAt ||= now
+        if (now - silenceStartedAt >= INTERRUPTION_SILENCE_MS) {
+          hasSpeech = false
+          speechStartedAt = 0
+          silenceStartedAt = 0
+          if (activeRecorder?.state === 'recording') {
+            interruptionInFlightRef.current = true
+            activeRecorder.stop()
+          }
+        }
+      } else silenceStartedAt = 0
+
+      interruptionRafRef.current = requestAnimationFrame(tick)
+    }
+
+    const setup = async () => {
+      try {
+        const supported = navigator.mediaDevices.getSupportedConstraints?.() || {}
+        const audio = {
+          echoCancellation: supported.echoCancellation ? { ideal: true } : true,
+          noiseSuppression: supported.noiseSuppression ? { ideal: true } : true,
+          autoGainControl: supported.autoGainControl ? { ideal: true } : true,
+        }
+        if (supported.channelCount) audio.channelCount = { ideal: 1 }
+        stream = await navigator.mediaDevices.getUserMedia({ audio, video: false })
+        if (!current() || !sessionRef.current || orbStateRef.current !== 'speaking') {
+          stream.getTracks().forEach(track => track.stop())
+          return
+        }
+        interruptionStreamRef.current = stream
+        const AudioContextType = window.AudioContext || window.webkitAudioContext
+        context = new AudioContextType()
+        interruptionContextRef.current = context
+        if (context.state === 'suspended') await context.resume()
+        if (!current()) return
+        source = context.createMediaStreamSource(stream)
+        highPass = context.createBiquadFilter()
+        highPass.type = 'highpass'; highPass.frequency.value = 110
+        lowPass = context.createBiquadFilter()
+        lowPass.type = 'lowpass'; lowPass.frequency.value = 3800
+        analyser = context.createAnalyser(); analyser.fftSize = 1024
+        source.connect(highPass); highPass.connect(lowPass); lowPass.connect(analyser)
+        interruptionAnalyserRef.current = analyser
+        interruptionRafRef.current = requestAnimationFrame(tick)
+      } catch {
+        // If the mic or browser recognition path is unavailable, keep speaking normally.
+        cleanup()
+      }
+    }
+
+    interruptionTriggeredRef.current = false
+    void setup()
+    return cleanup
+  }, [orbState, sessionOn])
 
   useEffect(() => {
     if (apiStatus === 'ready' && pendingListenRef.current) {
