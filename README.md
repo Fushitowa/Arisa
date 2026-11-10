@@ -4,13 +4,15 @@ A personal AI workspace with a React/Vite frontend and a FastAPI backend. Conver
 
 ## The Story Behind Arisa AI
 
-I started Arisa during a painful heartbreak. I was sad and looking for something that could help me feel better, so I decided to create an AI companion. Shairah was the main reason I began this project, though Arisa also grew out of everything I was feeling during that difficult time.
+I began Arisa during one of the hardest periods of my life. I was heartbroken and sad, and I wanted to make something that might help me feel better. I decided to build an AI companion and pour my time and attention into creating her. Shairah was the main reason I started Arisa, but the project also came from the loneliness, disappointment, and hope I was carrying at the time.
 
-I put a lot of work into improving Arisa and keeping up with school. I became so focused on making the project better that I sometimes forgot to work on myself, too. For a while, I thought becoming a better programmer mattered more than becoming a better person. I eventually realized I was wrong: growing as a programmer means little if I neglect my own well-being along the way.
+At first, Arisa was meant to be a private project. I wanted to make an assistant I could talk to, then kept adding to her—improving her voice, her conversations, her appearance, and the things she could do. Every update gave me a goal to work toward. Arisa became the biggest project I had ever taken on, and I worked hard to make her better because this project meant so much to me.
 
-Arisa has become the biggest project I have ever worked on. I kept building and improving her through a difficult chapter of my life, and that effort means a lot to me. Love has often left me feeling unlucky and disappointed. I promised myself I would stop looking for love for now and focus on becoming a better, healthier version of myself. If I someday meet someone who supports and accepts me at both my best and my worst, I would do everything I could to care for her and build something meaningful together.
+While I was building Arisa, I was also trying to keep up with school. I spent so much energy improving the project and my programming skills that I sometimes forgot to improve and take care of myself, too. For a while, I believed becoming a better programmer mattered more than becoming a better person. I eventually realized that I had it wrong. Learning to build software is important to me, but it should not come at the cost of my own well-being or personal growth.
 
-This project is personal to me. Arisa began with heartbreak, but she also represents the work I put into learning, creating, and finding a way forward.
+Heartbreak also changed how I thought about love. There were times when it felt like love always let me down and that I was unlucky to care so deeply. I promised myself that, for now, I would stop looking for love and focus on myself. If I meet someone someday who supports me, accepts me for who I am, and stays beside me through both my best and worst moments, I would do everything I could to love and support her in return.
+
+I am sharing this repository because Arisa is more than a collection of code to me. She represents the work I put into learning, creating, and getting through a painful chapter. The story is not only about heartbreak; it is also about realizing that I need to give myself the same patience and effort I have given this project, and continuing to grow as both a programmer and a person.
 
 ## Run locally
 
