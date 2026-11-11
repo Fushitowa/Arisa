@@ -1,6 +1,12 @@
 const { contextBridge, ipcRenderer } = require('electron')
 
 contextBridge.exposeInMainWorld('arisaDesktop', {
+  getComputerSettings() {
+    return ipcRenderer.invoke('computer:get-settings')
+  },
+  setComputerSettings(update) {
+    return ipcRenderer.invoke('computer:set-settings', update)
+  },
   getWakeStatus() {
     return ipcRenderer.invoke('wake:get-status')
   },

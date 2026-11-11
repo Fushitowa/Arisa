@@ -3,6 +3,7 @@ const { spawn } = require('node:child_process')
 const fs = require('node:fs')
 const path = require('node:path')
 const http = require('node:http')
+const crypto = require('node:crypto')
 
 const dev = !app.isPackaged
 const root = app.getAppPath()
@@ -31,6 +32,7 @@ let voiceUiState = 'idle'
 let lastWakeAt = 0
 let wakeRendererReady = false
 let pendingWake = null
+const computerSessionToken = crypto.randomBytes(32).toString('hex')
 const expectedListenerStops = new WeakMap()
 
 const WAKE_DIAGNOSTIC_PREFIX = 'ARISA_WAKE_DIAGNOSTIC '
@@ -87,7 +89,7 @@ async function startBackend() {
   }
   backend = spawn(pythonPath(), ['-m', 'uvicorn', 'main:app', '--host', '127.0.0.1', '--port', String(backendPort)], {
     cwd: backendDir, windowsHide: true, stdio: 'ignore',
-    env: { ...process.env, ARISA_ENV_FILE: envFile, DATABASE_PATH: dbFile },
+    env: { ...process.env, ARISA_ENV_FILE: envFile, DATABASE_PATH: dbFile, ARISA_SETTINGS_FILE: wakeSettingsPath(), ARISA_COMPUTER_SESSION_TOKEN: computerSessionToken },
   })
   backend.on('error', () => tray?.displayBalloon({ title: 'Arisa AI', content: 'Could not start the API. Check Python and backend dependencies.' }))
   const ready = await waitFor(backendPort, '/api/health')
@@ -581,6 +583,19 @@ app.whenReady().then(async () => {
     recordWakeDiagnostic(stage, details && typeof details === 'object' ? details : {})
   })
   ipcMain.handle('wake:get-status', () => getWakeStatus())
+  ipcMain.handle('computer:get-settings', () => ({
+    enabled: readSettings().computerUseEnabled === true,
+    screenVision: readSettings().screenVisionEnabled === true,
+    sessionToken: computerSessionToken,
+  }))
+  ipcMain.handle('computer:set-settings', (_event, update) => {
+    const settings = {
+      computerUseEnabled: update?.enabled === true,
+      screenVisionEnabled: update?.enabled === true && update?.screenVision === true,
+    }
+    saveSettings(settings)
+    return { ...settings, sessionToken: computerSessionToken }
+  })
   ipcMain.handle('wake:set-enabled', (_event, enabled) => setVoiceActivation(enabled))
   ipcMain.handle('wake:set-startup', (_event, enabled) => setWindowsStartup(enabled))
   ipcMain.handle('wake:retry', () => retryWakeListener())

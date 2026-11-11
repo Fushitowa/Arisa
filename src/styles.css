@@ -534,3 +534,5 @@
   .desktop-voice-shell .voice-state-speaking::before { animation: none; }
   .desktop-voice-shell .arisa-character-button { transition: none; }
 }
+.computer-cancel-inline{align-self:center;padding:5px 8px;border:1px solid #ffffff18;border-radius:7px;background:#1b1823;color:#c9baff;font-size:10px}
+.computer-cancel-inline:hover{border-color:#a28cff66;background:#a28cff12}

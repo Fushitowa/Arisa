@@ -8,6 +8,8 @@ A personal Windows AI assistant built with React, Electron, and FastAPI. Arisa s
 - Offline Vosk wake phrase detection
 - Natural language requests to launch a limited set of desktop applications
 - A loaded Desktop Application Controller skill for opening apps and gracefully closing visible app windows
+- Opt-in Windows screen perception and constrained keyboard/mouse interaction
+- Browser navigation, Notepad writing, and Spotify playback controls through separate skills
 - SQLite storage for conversation history, memories, and tasks
 - Protected creator identity, kept separate from editable personal memories
 - PDF, TXT, and Markdown uploads with bounded document excerpts in chat context
@@ -77,7 +79,17 @@ Wake phrase detection stays local. During a conversation, voice messages use the
 
 Arisa can open or gracefully close visible windows for Spotify, Brave, VLC media player, Google Chrome, Steam, Discord, VS Code, Calculator, Notepad, and File Explorer through natural voice or text requests. She recognizes aliases such as Chrome, Visual Studio Code, and Explorer, and can infer Spotify from “my music app.” If you only ask for “my browser,” she asks whether you mean Chrome or Brave. TikTok opens in the default browser; Arisa will not close a browser window to close TikTok because that could disrupt unrelated tabs.
 
-Application control is limited to the allowlist. Arisa does not have general access to files, keyboard input, shell commands, force termination, or arbitrary applications. Windows verifies launches before Arisa gives a confirmation; if it cannot confirm an app opened, she does not claim that it did. Closing sends the app window a normal Windows close request and verifies whether visible windows closed. An app may show its own save prompt or remain running in the background; Arisa reports when closure cannot be confirmed.
+Application opening and closing are limited to the allowlist. Windows verifies launches before Arisa gives a confirmation; if it cannot confirm an app opened, she does not claim that it did. Closing sends the app window a normal Windows close request and verifies whether visible windows closed. An app may show its own save prompt or remain running in the background; Arisa reports when closure cannot be confirmed.
+
+## Computer Use and Screen Privacy
+
+Computer interaction is off by default. In the desktop **Voice activation** card, turn on **Allow computer interaction** before asking Arisa to inspect or operate visible applications. The permission is saved on this PC and can be turned off at any time. For a task you request, the active window title and accessible control text are sent to Groq so it can choose an action; close sensitive windows first. Arisa uses Windows UI Automation to inspect named controls. She can focus a window, click an accessible control, type requested text, use a restricted set of keyboard shortcuts, scroll, navigate an http(s) URL in an already-open Brave or Chrome window, and use Spotify media keys when Spotify is the active window.
+
+The separate **Share requested screenshots with Groq** switch is off by default. Accessible controls can support many tasks without an image. When a visual question needs one, Arisa captures a screenshot for that requested task and sends it to Groq only while this second setting is on. Screenshots are not stored or logged by Arisa. Do not enable sharing when sensitive information is visible unless you are comfortable sending that image to your configured Groq account.
+
+Arisa checks the active app and visible interface before acting, then inspects again to verify the result. Tasks can be cancelled from the voice screen. She will not send or submit messages/forms, make purchases, delete files, overwrite documents, change security settings, or enter text into password fields. If a task is ambiguous or a control cannot be identified safely, she will ask or explain the limitation. Desktop interaction is Windows-only; accessibility coverage varies by application, and browser page content that is not exposed to Windows UI Automation may require screenshot sharing. The Spotify integration uses the desktop interface and Windows media keys; no Spotify API credentials are configured.
+
+The backend dependencies for Windows interaction are listed in `backend/requirements.txt`. Run `python -m pip install -r requirements.txt` inside the backend environment before launching a development build or packaging a new installer.
 
 ## Build the Windows Installer
 

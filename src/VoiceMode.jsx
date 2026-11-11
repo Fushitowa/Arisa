@@ -147,6 +147,7 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
   const [wakeStatus,      setWakeStatus]      = useState(null)
   const [wakeSettingsBusy,setWakeSettingsBusy]= useState(false)
   const [wakeDiagnosticsOpen, setWakeDiagnosticsOpen] = useState(false)
+  const [computerSettings, setComputerSettings] = useState({ enabled: false, screenVision: false, sessionToken: '' })
 
   // ── Refs (used inside callbacks to avoid stale closures) ─────────────────
   const orbStateRef    = useRef('idle')
@@ -165,6 +166,7 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
   const interruptionRequestRef = useRef(null)
   const interruptionInFlightRef = useRef(false)
   const interruptionTriggeredRef = useRef(false)
+  const computerTaskRef = useRef('')
   const startListeningRef = useRef(null)
   const pendingListenRef = useRef(false)
   const pendingListenTriggerRef = useRef('user')
@@ -207,6 +209,24 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
       })
     return () => { stopped = true; unsubscribe?.() }
   }, [desktopMode])
+
+  useEffect(() => {
+    if (!desktopMode || !window.arisaDesktop?.getComputerSettings) return
+    window.arisaDesktop.getComputerSettings().then(setComputerSettings).catch(() => {})
+  }, [desktopMode])
+
+  const updateComputerSettings = async update => {
+    setWakeSettingsBusy(true)
+    try {
+      if (update.enabled === false && computerTaskRef.current) cancelComputerTask()
+      const settings = await window.arisaDesktop?.setComputerSettings?.(update)
+      if (settings) setComputerSettings(settings)
+    } catch (error) {
+      setError(error.message || 'Could not update computer-use permissions.')
+    } finally {
+      setWakeSettingsBusy(false)
+    }
+  }
 
   const updateWakeSetting = async (setting, enabled) => {
     setWakeSettingsBusy(true)
@@ -264,6 +284,23 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
     }
     audioElRef.current = null
     window.speechSynthesis?.cancel()
+  }
+
+  const cancelComputerTask = () => {
+    const taskId = computerTaskRef.current
+    if (!taskId) return
+    const token = computerSettings.sessionToken
+    if (token) fetch(`${API}/computer/cancel`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Arisa-Computer-Token': token },
+      body: JSON.stringify({ task_id: taskId }),
+      keepalive: true,
+    }).catch(() => {})
+    computerTaskRef.current = ''
+    cancelSpeechPlayback()
+    setOrbState('idle')
+    setStatusHint('')
+    setError('Computer task cancelled. An action already in progress may have just completed.')
   }
 
   // Tear everything down on unmount
@@ -524,10 +561,33 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
       fd.append('file', blob, 'voice.webm')
       if (convIdRef.current) fd.append('conversation_id', convIdRef.current)
       fd.append('desktop_mode', String(desktopMode))
-      fd.append('stream_response', 'true')
+      fd.append('computer_use', String(computerSettings.enabled))
+      fd.append('screen_vision', String(computerSettings.enabled && computerSettings.screenVision))
+      const useStream = !computerSettings.enabled
+      fd.append('stream_response', String(useStream))
+      const taskId = computerSettings.enabled ? window.crypto.randomUUID() : ''
+      if (taskId) {
+        computerTaskRef.current = taskId
+        fd.append('task_id', taskId)
+      }
 
-      const res = await fetch(`${API}/arisa/voice`, { method: 'POST', body: fd, signal: controller.signal })
+      const headers = computerSettings.sessionToken ? { 'X-Arisa-Computer-Token': computerSettings.sessionToken } : {}
+      const res = await fetch(`${API}/arisa/voice`, { method: 'POST', headers, body: fd, signal: controller.signal })
       if (!res.ok) throw new Error((await readApiResult(res, 'Voice API request')).detail || 'Voice API request failed.')
+      if (!useStream) {
+        const data = await res.json()
+        setTranscript(data.user_transcript || '')
+        convIdRef.current = data.conversation_id || convIdRef.current
+        const finalReply = data.arisa_reply || 'I could not complete that computer task.'
+        setReply(finalReply)
+        setArisaEmotion(inferArisaEmotion(finalReply))
+        responseFinished = true
+        speechQueue.push({ text: finalReply, audio: null })
+        void drainSpeechQueue()
+        await speechComplete
+        if (computerTaskRef.current === taskId) computerTaskRef.current = ''
+        return
+      }
       if (!res.body) throw new Error('The voice API did not open a response stream.')
 
       const reader = res.body.getReader()
@@ -547,6 +607,7 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
       if (buffer.trim()) handleEvent(buffer)
       if (!responseFinished && !cancelled) throw new Error('Arisa’s response stream ended unexpectedly.')
       await speechComplete
+      if (computerTaskRef.current === taskId) computerTaskRef.current = ''
     } catch (e) {
       if (!cancelled) {
         cancelSpeechPlayback()
@@ -559,8 +620,9 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
         if (audioCtxRef.current?.state !== 'closed') audioCtxRef.current?.close().catch(() => {})
         audioCtxRef.current = null
       }
+      computerTaskRef.current = ''
     }
-  }, [desktopMode, playTTS])
+  }, [desktopMode, playTTS, computerSettings])
 
   // ── Start listening ───────────────────────────────────────────────────────
   const startListening = useCallback(async (trigger = 'user') => {
@@ -998,13 +1060,16 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
     setReply('')
     setError('')
     try {
+      const taskId = computerSettings.enabled ? window.crypto.randomUUID() : ''
+      if (taskId) computerTaskRef.current = taskId
       const response = await fetch(`${API}/chat`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ conversation_id: convIdRef.current, message, desktop_mode: desktopMode }),
+        headers: { 'Content-Type': 'application/json', ...(computerSettings.sessionToken ? { 'X-Arisa-Computer-Token': computerSettings.sessionToken } : {}) },
+        body: JSON.stringify({ conversation_id: convIdRef.current, message, desktop_mode: desktopMode, computer_use: computerSettings.enabled, screen_vision: computerSettings.enabled && computerSettings.screenVision, task_id: taskId || null }),
       })
       const data = await response.json()
       if (!response.ok) throw new Error(data.detail || 'Chat request failed.')
+      if (taskId && computerTaskRef.current !== taskId) return
       convIdRef.current = data.conversation_id
       setReply(data.reply)
       setArisaEmotion(inferArisaEmotion(data.reply))
@@ -1012,6 +1077,7 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
     } catch (e) {
       setError(e.message || 'Could not send that message.')
     } finally {
+      computerTaskRef.current = ''
       setTextBusy(false)
     }
   }
@@ -1153,6 +1219,11 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
             <Volume2 size={18} /> Skip response
           </button>
         )}
+        {orbState === 'thinking' && computerSettings.enabled && (
+          <button className="voice-stop-btn" onClick={cancelComputerTask}>
+            <X size={17} /> Cancel computer task
+          </button>
+        )}
         {sessionOn && orbState === 'idle' && (
           <button className="voice-continue-btn" onClick={startListening}>
             <Mic size={15} /> Continue speaking
@@ -1166,6 +1237,7 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
           onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendText() } }}
           placeholder="Type to Arisa — replies are spoken aloud" aria-label="Message Arisa by text" />
         <button type="submit" disabled={apiStatus !== 'ready' || !textInput.trim() || textBusy} aria-label="Send message"><Send size={17}/></button>
+        {textBusy && computerSettings.enabled && <button type="button" className="computer-cancel-inline" onClick={cancelComputerTask}>Cancel task</button>}
       </form>}
 
       {desktopMode && wakeStatus && <section className="voice-activation-settings" aria-label="Voice activation settings">
@@ -1184,6 +1256,15 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
           <div><strong>Start Arisa with Windows</strong><span>Keep wake phrases available after you sign in.</span></div>
           <button type="button" className={`wake-switch ${wakeStatus.runAtLogin ? 'enabled' : ''}`} role="switch" aria-checked={!!wakeStatus.runAtLogin} aria-label="Start Arisa with Windows" disabled={wakeSettingsBusy} onClick={() => updateWakeSetting('startup', !wakeStatus.runAtLogin)}><i /></button>
         </div>
+        <div className="wake-setting-row startup-row">
+          <div><strong>Allow computer interaction</strong><span>For tasks you request, Arisa sends the active window title and accessible control text to Groq so it can choose actions. Close sensitive windows first.</span></div>
+          <button type="button" className={`wake-switch ${computerSettings.enabled ? 'enabled' : ''}`} role="switch" aria-checked={computerSettings.enabled} aria-label="Allow computer interaction" disabled={wakeSettingsBusy} onClick={() => updateComputerSettings({ enabled: !computerSettings.enabled, screenVision: !computerSettings.enabled && computerSettings.screenVision })}><i /></button>
+        </div>
+        <div className="wake-setting-row startup-row">
+          <div><strong>Share requested screenshots with Groq</strong><span>Also send a screenshot when visual detail is needed. It may contain private information; close sensitive windows first.</span></div>
+          <button type="button" className={`wake-switch ${computerSettings.screenVision ? 'enabled' : ''}`} role="switch" aria-checked={computerSettings.screenVision} aria-label="Allow screenshot sharing" disabled={wakeSettingsBusy || !computerSettings.enabled} onClick={() => updateComputerSettings({ enabled: true, screenVision: !computerSettings.screenVision })}><i /></button>
+        </div>
+        <p className="wake-private-note"><CheckCircle2 size={13}/> Both permissions are off by default. Arisa uses screen information only for tasks you request; screenshot images require the second switch.</p>
         {wakeStatus.error && <div className="wake-listener-error" role="alert"><AlertCircle size={15}/><span>{wakeStatus.error}</span></div>}
         {wakeStatus.startupError && <div className="wake-listener-error" role="alert"><AlertCircle size={15}/><span>{wakeStatus.startupError}</span></div>}
         {['error', 'stopped', 'retrying'].includes(wakeStatus.state) && wakeStatus.enabled && <button type="button" className="wake-retry-button" onClick={retryWakeListener} disabled={wakeSettingsBusy}><RefreshCw size={14}/>{wakeSettingsBusy ? 'Starting listener…' : 'Retry wake listener'}</button>}
