@@ -13,6 +13,12 @@ contextBridge.exposeInMainWorld('arisaDesktop', {
   retryWakeListener() {
     return ipcRenderer.invoke('wake:retry')
   },
+  clearWakeDiagnostics() {
+    return ipcRenderer.invoke('wake:clear-diagnostics')
+  },
+  reportWakeDiagnostic(stage, details) {
+    ipcRenderer.send('wake:diagnostic', stage, details || {})
+  },
   onWakeStatus(callback) {
     const handler = (_event, status) => callback(status)
     ipcRenderer.on('wake-status', handler)
@@ -22,8 +28,12 @@ contextBridge.exposeInMainWorld('arisaDesktop', {
     ipcRenderer.send('voice-state', state)
   },
   onWake(callback) {
-    const handler = () => callback()
+    const handler = (_event, request) => {
+      if (request?.request_id) ipcRenderer.send('wake:renderer-ack', request.request_id)
+      callback(request || {})
+    }
     ipcRenderer.on('wake-detected', handler)
+    ipcRenderer.send('wake:renderer-ready')
     return () => ipcRenderer.removeListener('wake-detected', handler)
   },
   onHidden(callback) {

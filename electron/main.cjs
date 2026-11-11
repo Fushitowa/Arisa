@@ -19,7 +19,9 @@ let listenerRestartAttempts = 0
 let listenerReady = false
 let listenerError = ''
 let listenerOutput = ''
+let listenerStdoutBuffer = ''
 let startupError = ''
+const wakeDiagnostics = []
 let backend
 let vite
 let listenerEnabled = true
@@ -27,6 +29,16 @@ let backendReady = false
 let quitting = false
 let voiceUiState = 'idle'
 let lastWakeAt = 0
+let wakeRendererReady = false
+let pendingWake = null
+const expectedListenerStops = new WeakMap()
+
+const WAKE_DIAGNOSTIC_PREFIX = 'ARISA_WAKE_DIAGNOSTIC '
+const RENDERER_DIAGNOSTIC_STAGES = new Set([
+  'wake_renderer_received', 'wake_renderer_busy', 'voice_start_waiting_for_api',
+  'voice_api_unconfigured', 'voice_microphone_acquired', 'voice_listening_started',
+  'voice_start_failed',
+])
 
 const ownsSingleInstance = app.requestSingleInstanceLock()
 if (!ownsSingleInstance) {
@@ -137,6 +149,29 @@ function getStartupSettings() {
   return app.getLoginItemSettings(startupOptions())
 }
 
+function recordWakeDiagnostic(stage, details = {}) {
+  const diagnostic = { at: new Date().toISOString(), stage: String(stage).slice(0, 60) }
+  const stringFields = [
+    'transcript', 'normalized', 'reason', 'device_name', 'error', 'message', 'request_id',
+  ]
+  const numberFields = [
+    'required_confidence', 'observed_min_confidence', 'sample_rate', 'channels', 'status_code', 'attempt',
+  ]
+  for (const key of stringFields) {
+    if (typeof details[key] === 'string') diagnostic[key] = details[key].slice(0, 180)
+  }
+  for (const key of numberFields) {
+    if (Number.isFinite(details[key])) diagnostic[key] = details[key]
+  }
+  for (const key of ['accepted', 'visible']) {
+    if (typeof details[key] === 'boolean') diagnostic[key] = details[key]
+  }
+  wakeDiagnostics.push(diagnostic)
+  if (wakeDiagnostics.length > 50) wakeDiagnostics.splice(0, wakeDiagnostics.length - 50)
+  publishWakeStatus()
+  return diagnostic
+}
+
 function getWakeStatus() {
   let state = 'stopped'
   if (!listenerEnabled) state = 'disabled'
@@ -153,6 +188,7 @@ function getWakeStatus() {
     state,
     error: listenerError,
     startupError,
+    diagnostics: wakeDiagnostics.slice(-50),
   }
 }
 
@@ -167,6 +203,7 @@ function stopWakeListener() {
   const current = listener
   listener = null
   listenerReady = false
+  expectedListenerStops.set(current, listenerEnabled ? 'paused while Arisa uses the conversation microphone' : 'voice activation disabled')
   current.kill()
   publishWakeStatus()
 }
@@ -176,6 +213,32 @@ function reconcileWakeListener() {
   else stopWakeListener()
 }
 
+function handleWakeListenerLine(line, child) {
+  if (listener !== child) return
+  if (line.startsWith(WAKE_DIAGNOSTIC_PREFIX)) {
+    try {
+      const event = JSON.parse(line.slice(WAKE_DIAGNOSTIC_PREFIX.length))
+      if (!event || typeof event.stage !== 'string') return
+      if (event.stage === 'listener_ready' && listener === child) {
+        listenerReady = true
+        listenerError = ''
+        listenerRestartAttempts = 0
+      }
+      recordWakeDiagnostic(event.stage, event)
+    } catch {
+      recordWakeDiagnostic('listener_diagnostic_parse_error', { message: 'A listener diagnostic line could not be decoded.' })
+    }
+    return
+  }
+
+  if (line.includes('Wake listener active') && listener === child) {
+    listenerReady = true
+    listenerError = ''
+    listenerRestartAttempts = 0
+    publishWakeStatus()
+  }
+}
+
 function startWakeListener() {
   if (!shouldListenForWake() || listener) return
   const script = path.join(backendDir, 'wake_listener.py')
@@ -183,26 +246,32 @@ function startWakeListener() {
   listenerReady = false
   listenerError = ''
   listenerOutput = ''
+  listenerStdoutBuffer = ''
   const child = spawn(pythonPath(), [script], {
     cwd: path.dirname(script), windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
     env: { ...process.env, ARISA_WAKE_MODEL_DIR: path.join(app.getPath('userData'), 'wake-model') },
   })
   listener = child
+  recordWakeDiagnostic('listener_process_started')
   publishWakeStatus()
 
   child.stdout.on('data', chunk => {
     const output = chunk.toString()
     listenerOutput = `${listenerOutput}${output}`.slice(-4000)
-    if (output.includes('Wake listener active')) {
-      listenerReady = true
-      listenerError = ''
-      listenerRestartAttempts = 0
-      publishWakeStatus()
+    listenerStdoutBuffer += output
+    const lines = listenerStdoutBuffer.split(/\r?\n/)
+    listenerStdoutBuffer = lines.pop() || ''
+    for (const line of lines) {
+      if (line) handleWakeListenerLine(line, child)
     }
   })
   child.stderr.on('data', chunk => {
+    if (listener !== child) return
     const output = chunk.toString()
     listenerOutput = `${listenerOutput}${output}`.slice(-4000)
+    for (const line of output.split(/\r?\n/).filter(Boolean)) {
+      recordWakeDiagnostic('listener_stderr', { message: line })
+    }
     const failure = output.match(/Wake listener (?:failed|dependencies are missing):[^\r\n]*/i)
     if (failure) {
       listenerError = failure[0]
@@ -210,15 +279,23 @@ function startWakeListener() {
     }
   })
   child.on('error', error => {
+    if (listener !== child) return
     listenerError = `Could not start the wake listener: ${error.message}`
     if (listener === child) listener = null
     listenerReady = false
     publishWakeStatus()
   })
   child.on('exit', code => {
+    if (listenerStdoutBuffer) handleWakeListenerLine(listenerStdoutBuffer, child)
+    listenerStdoutBuffer = ''
+    const intentionalStop = expectedListenerStops.get(child)
     if (listener === child) listener = null
     listenerReady = false
-    if (shouldListenForWake() && code !== 0) {
+    recordWakeDiagnostic(
+      intentionalStop ? 'listener_paused' : 'listener_process_exited',
+      { message: intentionalStop || `Wake listener exited with code ${code}.` },
+    )
+    if (!intentionalStop && shouldListenForWake() && code !== 0) {
       if (!listenerError) {
         listenerError = listenerOutput.split(/\r?\n/).filter(Boolean).slice(-1)[0]
           || `The wake listener exited with code ${code}.`
@@ -232,21 +309,83 @@ function startWakeListener() {
         title: 'Arisa wake word stopped',
         content: `${listenerError} Check Windows microphone access and the backend setup.`.slice(0, 240),
       })
-    } else if (code === 0 || Date.now() - startedAt >= 30000) {
+    } else if (intentionalStop || code === 0 || Date.now() - startedAt >= 30000) {
       listenerRestartAttempts = 0
     }
     publishWakeStatus()
   })
 }
 
-function sendWake() {
-  if (!windowRef || windowRef.isDestroyed()) return
-  if (Date.now() - lastWakeAt < 2500) return
+function dispatchPendingWake() {
+  const request = pendingWake
+  if (!request || !wakeRendererReady || !windowRef || windowRef.isDestroyed() || windowRef.webContents.isDestroyed()) return
+  request.attempts += 1
+  request.sentAt = Date.now()
+  try {
+    windowRef.webContents.send('wake-detected', {
+      request_id: request.request_id,
+      transcript: request.transcript,
+    })
+  } catch (error) {
+    recordWakeDiagnostic('renderer_send_failed', {
+      request_id: request.request_id,
+      error: error.message,
+    })
+    return
+  }
+  recordWakeDiagnostic('renderer_notified', {
+    request_id: request.request_id,
+    transcript: request.transcript,
+    attempt: request.attempts,
+  })
+  clearTimeout(request.ackTimer)
+  request.ackTimer = setTimeout(() => {
+    if (pendingWake !== request) return
+    if (request.attempts < 3 && wakeRendererReady) {
+      recordWakeDiagnostic('renderer_ack_retry', { request_id: request.request_id, attempt: request.attempts + 1 })
+      dispatchPendingWake()
+    } else {
+      recordWakeDiagnostic('renderer_ack_timeout', {
+        request_id: request.request_id,
+        message: 'The voice window did not acknowledge the wake event.',
+      })
+      pendingWake = null
+    }
+  }, 1200)
+}
+
+function sendWake(payload = {}) {
+  const requestId = typeof payload.request_id === 'string' ? payload.request_id.slice(0, 80) : ''
+  const transcript = typeof payload.transcript === 'string' ? payload.transcript.slice(0, 180) : ''
+  recordWakeDiagnostic('wake_bridge_received', { request_id: requestId, transcript })
+  if (!windowRef || windowRef.isDestroyed()) {
+    recordWakeDiagnostic('wake_window_unavailable', {
+      request_id: requestId,
+      message: 'Electron received the wake request but has no usable window.',
+    })
+    return { status: 503, accepted: false }
+  }
+  if (Date.now() - lastWakeAt < 2500) {
+    recordWakeDiagnostic('wake_duplicate_suppressed', { request_id: requestId, transcript })
+    return { status: 429, accepted: false }
+  }
+
   lastWakeAt = Date.now()
   voiceUiState = 'starting'
+  pendingWake = {
+    request_id: requestId || `wake-${lastWakeAt}`,
+    transcript,
+    attempts: 0,
+    ackTimer: null,
+  }
   showWindow()
-  if (windowRef.webContents.isLoading()) windowRef.webContents.once('did-finish-load', () => windowRef?.webContents.send('wake-detected'))
-  else windowRef.webContents.send('wake-detected')
+  recordWakeDiagnostic('wake_window_show_requested', {
+    request_id: pendingWake.request_id,
+    transcript,
+    visible: windowRef.isVisible(),
+  })
+  dispatchPendingWake()
+  return { status: 202, accepted: true }
 }
 
 function startWakeBridge() {
@@ -255,10 +394,38 @@ function startWakeBridge() {
       res.writeHead(404).end()
       return
     }
-    sendWake()
-    res.writeHead(204).end()
+    let body = ''
+    let oversized = false
+    req.on('data', chunk => {
+      if (oversized) return
+      body += chunk.toString()
+      if (body.length > 2048) {
+        oversized = true
+        res.writeHead(413).end()
+        req.destroy()
+      }
+    })
+    req.on('end', () => {
+      if (oversized) return
+      let payload = {}
+      try { payload = body ? JSON.parse(body) : {} }
+      catch {
+        recordWakeDiagnostic('wake_bridge_invalid_payload', { message: 'The local wake request was not valid JSON.' })
+        res.writeHead(400).end(JSON.stringify({ accepted: false }))
+        return
+      }
+      if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+        recordWakeDiagnostic('wake_bridge_invalid_payload', { message: 'The local wake request must be a JSON object.' })
+        res.writeHead(400).end(JSON.stringify({ accepted: false }))
+        return
+      }
+      const result = sendWake(payload)
+      res.writeHead(result.status, { 'Content-Type': 'application/json' })
+        .end(JSON.stringify({ accepted: result.accepted }))
+    })
   })
-  server.listen(8765, '127.0.0.1')
+  server.on('error', error => recordWakeDiagnostic('wake_bridge_error', { error: error.message }))
+  server.listen(8765, '127.0.0.1', () => recordWakeDiagnostic('wake_bridge_listening'))
   app.on('before-quit', () => server.close())
 }
 
@@ -364,6 +531,9 @@ function createWindow() {
     title: 'Arisa AI',
     webPreferences: { preload: path.join(root, 'electron', 'preload.cjs'), contextIsolation: true, nodeIntegration: false, sandbox: true },
   })
+  wakeRendererReady = false
+  windowRef.webContents.on('did-start-loading', () => { wakeRendererReady = false })
+  windowRef.webContents.on('destroyed', () => { wakeRendererReady = false })
   windowRef.loadURL('http://127.0.0.1:5173/?desktop=voice')
   windowRef.on('close', event => {
     if (!quitting) {
@@ -391,10 +561,36 @@ app.whenReady().then(async () => {
     reconcileWakeListener()
     publishWakeStatus()
   })
+  ipcMain.on('wake:renderer-ready', event => {
+    if (event.sender !== windowRef?.webContents) return
+    wakeRendererReady = true
+    recordWakeDiagnostic('wake_renderer_ready')
+    dispatchPendingWake()
+  })
+  ipcMain.on('wake:renderer-ack', (event, requestId) => {
+    if (event.sender !== windowRef?.webContents || !pendingWake || requestId !== pendingWake.request_id) return
+    clearTimeout(pendingWake.ackTimer)
+    recordWakeDiagnostic('wake_renderer_acknowledged', {
+      request_id: pendingWake.request_id,
+      transcript: pendingWake.transcript,
+    })
+    pendingWake = null
+  })
+  ipcMain.on('wake:diagnostic', (event, stage, details) => {
+    if (event.sender !== windowRef?.webContents || !RENDERER_DIAGNOSTIC_STAGES.has(stage)) return
+    recordWakeDiagnostic(stage, details && typeof details === 'object' ? details : {})
+  })
   ipcMain.handle('wake:get-status', () => getWakeStatus())
   ipcMain.handle('wake:set-enabled', (_event, enabled) => setVoiceActivation(enabled))
   ipcMain.handle('wake:set-startup', (_event, enabled) => setWindowsStartup(enabled))
   ipcMain.handle('wake:retry', () => retryWakeListener())
+  ipcMain.handle('wake:clear-diagnostics', () => {
+    wakeDiagnostics.length = 0
+    listenerOutput = ''
+    listenerStdoutBuffer = ''
+    publishWakeStatus()
+    return getWakeStatus()
+  })
   session.defaultSession.setPermissionRequestHandler((_contents, permission, callback) => {
     callback(permission === 'media' || permission === 'notifications')
   })

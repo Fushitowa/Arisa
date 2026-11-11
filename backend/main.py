@@ -2,6 +2,7 @@ import os
 import asyncio
 import ctypes
 import json
+import random
 import re
 import shutil
 import subprocess
@@ -122,6 +123,77 @@ DESKTOP_TOOL = {
 }
 _desktop_launch_times: dict[str, float] = {}
 _desktop_launch_lock = threading.Lock()
+_desktop_response_lock = threading.Lock()
+_desktop_last_responses: dict[str, str] = {}
+_DESKTOP_ACTION_RESPONSES = {
+    "opened": (
+        "All set — {app} is open.",
+        "There you go, {app} is ready.",
+        "Done — I’ve opened {app} for you.",
+        "{app} is open now. What would you like to do next?",
+        "Of course — {app} is ready to go.",
+        "Right away — {app} is up.",
+    ),
+    "opened_browser": (
+        "All set — I’ve opened TikTok in your browser.",
+        "Done, TikTok is open in your default browser.",
+        "There you go — TikTok is open in the browser.",
+        "TikTok is ready in your browser.",
+    ),
+    "closed": (
+        "All done — the {app} window is closed.",
+        "There we go, I closed the {app} window.",
+        "I’ve closed the open {app} window for you.",
+        "Done — the visible {app} window is closed.",
+        "That’s taken care of — the {app} window is closed.",
+        "No problem — I closed the {app} window.",
+    ),
+    "already_open": (
+        "{app} is already open, so you’re all set.",
+        "I can see {app} is already running.",
+        "{app} is up already.",
+        "You’re good to go — {app} is already open.",
+    ),
+    "already_closed": (
+        "{app} isn’t running right now.",
+        "I don’t see {app} open at the moment.",
+        "{app} is already closed.",
+    ),
+    "opening": (
+        "I’m already bringing {app} up — just a moment.",
+        "{app} is still opening. Give it a second.",
+        "I’ve started opening {app}; it should be ready shortly.",
+    ),
+    "open_failed": (
+        "I couldn’t open {app}. {detail}",
+        "I tried, but {app} didn’t open. {detail}",
+        "Sorry, I wasn’t able to start {app}. {detail}",
+        "{app} didn’t come up this time. {detail}",
+    ),
+    "close_failed": (
+        "I couldn’t confirm that {app} closed. {detail}",
+        "{app} may still be open. {detail}",
+        "I tried to close {app}, but couldn’t finish. {detail}",
+        "Sorry, {app} is still not confirmed closed. {detail}",
+    ),
+    "close_unavailable": (
+        "I can’t close {app} safely. {detail}",
+        "Sorry, I can’t safely close {app}. {detail}",
+        "I’ll leave {app} as it is. {detail}",
+        "I can’t do that safely for {app}. {detail}",
+    ),
+}
+
+
+def desktop_action_response(outcome: str, app_label: str, detail: str = "") -> str:
+    """Choose a truthful, non-repeating recent response for a verified app outcome."""
+    options = _DESKTOP_ACTION_RESPONSES[outcome]
+    with _desktop_response_lock:
+        previous = _desktop_last_responses.get(outcome)
+        choices = [response for response in options if response != previous] or list(options)
+        selected = random.choice(choices)
+        _desktop_last_responses[outcome] = selected
+    return selected.format(app=app_label, detail=detail).strip()
 
 # ── Voice / TTS ──────────────────────────────────────────────────────────────
 TTS_PROVIDER       = os.getenv("TTS_PROVIDER", "edge")            # "edge" | "elevenlabs"
@@ -327,13 +399,19 @@ def launch_desktop_app(app_id: str) -> Optional[str]:
     app_name = app["name"]
     label = app["label"]
     if os.name != "nt":
-        return f"I can only open {label} from the Windows desktop app."
+        return desktop_action_response("open_failed", label, "Opening desktop apps is available in the Windows app.")
+
+    if app_id == "file_explorer":
+        if _desktop_app_windows(app_id):
+            return desktop_action_response("already_open", label)
+    elif app_id in DESKTOP_PROCESS_NAMES and _desktop_process_is_running(DESKTOP_PROCESS_NAMES[app_id]) is True:
+        return desktop_action_response("already_open", label)
 
     now_mono = time.monotonic()
     with _desktop_launch_lock:
         last_launch = _desktop_launch_times.get(app_id)
         if last_launch is not None and now_mono - last_launch < 5:
-            return f"{label} is already opening."
+            return desktop_action_response("opening", label)
         _desktop_launch_times[app_id] = now_mono
 
     env_path = lambda variable, default: Path(os.getenv(variable, default))
@@ -359,8 +437,8 @@ def launch_desktop_app(app_id: str) -> Optional[str]:
         if app_name == "tiktok":
             if not webbrowser.open("https://www.tiktok.com", new=2):
                 _clear_desktop_launch_cooldown(app_id)
-                return "I couldn't open TikTok in your default browser."
-            return "Sure, TikTok is open in your default browser."
+                return desktop_action_response("open_failed", label, "Windows didn’t confirm that your browser opened it.")
+            return desktop_action_response("opened_browser", label)
 
         app_path = next((path for path in candidates[app_name] if path.is_file()), None)
         if not app_path:
@@ -386,24 +464,24 @@ def launch_desktop_app(app_id: str) -> Optional[str]:
                 _spawn_desktop_app([str(updater), "--processStart", "Discord.exe"])
             else:
                 _clear_desktop_launch_cooldown(app_id)
-                return "I couldn't find Discord installed on this computer."
+                return desktop_action_response("open_failed", label, "I couldn’t find it installed on this computer.")
         elif app_name in ("spotify", "steam"):
             # Store and registered installations expose protocol handlers instead of stable paths.
             os.startfile("spotify:" if app_name == "spotify" else "steam:")
         else:
             _clear_desktop_launch_cooldown(app_id)
-            return f"I couldn't find {label} installed on this computer."
+            return desktop_action_response("open_failed", label, "I couldn’t find it installed on this computer.")
     except (OSError, AttributeError) as exc:
         _clear_desktop_launch_cooldown(app_id)
-        return f"I couldn't open {label}: {str(exc)[:180]}"
+        return desktop_action_response("open_failed", label, str(exc)[:180])
 
     verified = _wait_for_desktop_process(DESKTOP_PROCESS_NAMES[app_id])
     if verified is True:
-        return f"Sure, {label} is open."
+        return desktop_action_response("opened", label)
     if verified is False:
         _clear_desktop_launch_cooldown(app_id)
-        return f"Windows did not confirm that {label} opened."
-    return f"I sent Windows the request to open {label}, but couldn't verify that it opened."
+        return desktop_action_response("open_failed", label, "Windows didn’t confirm that it opened.")
+    return desktop_action_response("open_failed", label, "I sent the request, but couldn’t verify that it opened.")
 
 
 def _spawn_desktop_app(command: list[str]) -> None:
@@ -411,6 +489,32 @@ def _spawn_desktop_app(command: list[str]) -> None:
     if os.name == "nt":
         flags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
     subprocess.Popen(command, close_fds=True, creationflags=flags)
+
+
+def _desktop_process_is_running(image_names: tuple[str, ...]) -> Optional[bool]:
+    """Inspect tasklist once so an already-running app is not launched again."""
+    if os.name != "nt":
+        return None
+    tasklist = shutil.which("tasklist") or str(Path(os.getenv("WINDIR", r"C:\Windows")) / "System32" / "tasklist.exe")
+    try:
+        result = subprocess.run(
+            [tasklist, "/FO", "CSV", "/NH"],
+            capture_output=True,
+            text=True,
+            timeout=1,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            check=False,
+        )
+        if result.returncode != 0:
+            return None
+        running = {
+            row[0].strip().lower()
+            for row in (line.split('\",\"', 1) for line in result.stdout.splitlines())
+            if row and row[0].strip().strip('"')
+        }
+        return any(name.lower() in running for name in image_names)
+    except (OSError, subprocess.SubprocessError):
+        return None
 
 
 def _wait_for_desktop_process(image_names: tuple[str, ...]) -> Optional[bool]:
@@ -540,34 +644,38 @@ def close_desktop_app(app_id: str) -> str:
         return "I can only close applications that are registered in my supported app list."
     label = app["label"]
     if app_id == "tiktok":
-        return "TikTok is opened as a browser page, so I can't safely close it without affecting your other tabs."
+        return desktop_action_response(
+            "close_unavailable",
+            label,
+            "It’s a browser page, so I can’t safely close it without affecting your other tabs.",
+        )
     if os.name != "nt":
-        return f"I can only close {label} from the Windows desktop app."
+        return desktop_action_response("close_failed", label, "Closing desktop apps is available in the Windows app.")
 
     windows = _desktop_app_windows(app_id)
     if windows is None:
-        return f"I couldn't safely inspect {label}'s windows, so I left it running."
+        return desktop_action_response("close_failed", label, "I couldn’t safely inspect its windows, so I left it running.")
     if not windows:
         running = _wait_for_desktop_process(DESKTOP_PROCESS_NAMES[app_id])
         if running is False:
-            return f"{label} isn't currently running."
+            return desktop_action_response("already_closed", label)
         if running is True:
-            return f"{label} is running in the background, but has no visible window I can safely close."
-        return f"I couldn't verify whether {label} is running, so I left it alone."
+            return desktop_action_response("close_failed", label, "It’s running in the background, but has no visible window I can safely close.")
+        return desktop_action_response("close_failed", label, "I couldn’t verify whether it’s running, so I left it alone.")
 
     sent = sum(_request_window_close(hwnd) for hwnd in windows)
     if not sent:
-        return f"I couldn't send a normal close request to {label}. It may still be open."
+        return desktop_action_response("close_failed", label, "I couldn’t send a normal close request.")
 
     deadline = time.monotonic() + 3.0
     while time.monotonic() < deadline:
         remaining = _desktop_app_windows(app_id)
         if remaining is None:
-            return f"I sent a close request to {label}, but couldn't verify that its windows closed."
+            return desktop_action_response("close_failed", label, "I sent a close request, but couldn’t verify that its windows closed.")
         if not remaining:
-            return f"The visible {label} window(s) are closed."
+            return desktop_action_response("closed", label)
         time.sleep(0.15)
-    return f"I couldn't close {label}. It may have an unsaved-changes prompt or may still be open."
+    return desktop_action_response("close_failed", label, "It may have an unsaved-changes prompt or may still be open.")
 
 
 def manage_desktop_app(action: str, app_id: Optional[str]) -> Optional[str]:

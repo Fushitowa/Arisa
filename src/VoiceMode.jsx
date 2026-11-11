@@ -1,11 +1,55 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
-import { AlertCircle, CheckCircle2, MessageSquare, Mic, MicOff, RefreshCw, Send, Volume2, X } from 'lucide-react'
+import { AlertCircle, CheckCircle2, ChevronDown, ChevronUp, MessageSquare, Mic, MicOff, RefreshCw, Send, Trash2, Volume2, X } from 'lucide-react'
 import ArisaCharacter, { inferArisaEmotion } from './ArisaCharacter'
 
 const API              = '/api'
 const SILENCE_MS       = 550  // Begin processing sooner after a natural pause
 const SPEECH_START_MS  = 150  // Reject brief clicks while arming quickly
 const VAD_CALIBRATION_MS = 300 // Establish the room's noise level before adapting the voice gate
+
+function wakeDiagnosticSummary(event) {
+  if (event.stage === 'listener_ready') return `Microphone stream open: ${event.device_name || 'default input'} · ${event.sample_rate || 16000} Hz`
+  if (event.stage === 'partial_transcript') return `Vosk is hearing: “${event.transcript || ''}”`
+  if (event.stage === 'phrase_result') {
+    if (event.accepted) return `Vosk accepted “${event.transcript}” as “${event.normalized}”.`
+    if (event.reason === 'phrase_not_authorized') return `Vosk heard “${event.transcript}”, but it didn’t match an allowed phrase.`
+    if (event.reason === 'confidence_below_threshold') return `Vosk heard “${event.transcript}”, but confidence was too low (${event.observed_min_confidence}; needs ${event.required_confidence}).`
+    if (event.reason === 'word_confidence_unavailable') return `Vosk heard “${event.transcript}”, but did not provide word-confidence data.`
+    return `Vosk could not recognize a complete phrase (${event.reason || 'unknown reason'}).`
+  }
+  const summaries = {
+    listener_process_started: 'Starting the local wake listener.',
+    listener_paused: event.message || 'The wake listener paused while Arisa uses the conversation microphone.',
+    wake_bridge_listening: 'Electron wake bridge is listening on this PC.',
+    wake_request_sending: `Authorized phrase matched; notifying Electron${event.transcript ? ` (“${event.transcript}”)` : ''}.`,
+    wake_request_response: `The local Electron bridge responded with HTTP ${event.status_code}.`,
+    wake_request_failed: `Could not reach Electron: ${event.error || 'unknown local connection error'}`,
+    wake_bridge_received: 'Electron received the wake request.',
+    wake_bridge_error: `Electron wake bridge error: ${event.error || event.message || 'unknown error'}`,
+    wake_window_unavailable: 'Electron received the phrase but has no available app window.',
+    wake_duplicate_suppressed: 'A repeated wake request was suppressed.',
+    wake_window_show_requested: `Electron requested the window to show${event.visible ? ' (visible)' : ''}.`,
+    wake_renderer_ready: 'The voice interface is ready to receive wake events.',
+    renderer_notified: `Electron sent the wake event to the voice interface (attempt ${event.attempt || 1}).`,
+    renderer_ack_retry: `The voice interface did not acknowledge yet; retrying (attempt ${event.attempt || 2}).`,
+    renderer_ack_timeout: event.message || 'The voice interface did not acknowledge the wake event.',
+    renderer_send_failed: `Electron could not send the wake event: ${event.error || 'voice window unavailable'}`,
+    wake_renderer_acknowledged: 'The voice interface received the wake event.',
+    wake_renderer_received: 'Arisa’s voice screen received the wake event.',
+    wake_renderer_busy: 'The voice screen received the wake event but was already busy.',
+    voice_start_waiting_for_api: 'Waiting for Arisa’s API before starting the microphone.',
+    voice_api_unconfigured: 'The voice screen cannot start listening until the AI API is configured.',
+    voice_microphone_acquired: 'Arisa’s conversation microphone opened successfully.',
+    voice_listening_started: 'Arisa is now ready to hear your next instruction.',
+    voice_start_failed: `Arisa could not start the conversation microphone: ${event.error || 'check microphone access'}`,
+    listener_process_exited: event.message || 'The local wake listener exited.',
+    listener_stderr: `Wake listener message: ${event.message || ''}`,
+    listener_diagnostic_parse_error: event.message || 'Could not read a listener diagnostic event.',
+    audio_overflow: event.message || 'The microphone input buffer overflowed.',
+    wake_bridge_invalid_payload: event.message || 'Electron rejected an invalid local wake request.',
+  }
+  return summaries[event.stage] || `Wake pipeline: ${String(event.stage || 'unknown').replaceAll('_', ' ')}`
+}
 const MAX_RECORD_MS    = 300000 // Safety limit for an unattended recording (5 minutes)
 const MIN_BLOB_BYTES   = 1500  // Ignore clicks while retaining short, quiet utterances
 const INTERRUPTION_KEYWORDS = new Set(['stop', 'enough', 'wait'])
@@ -102,6 +146,7 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
   const [arisaEmotion,    setArisaEmotion]    = useState('neutral')
   const [wakeStatus,      setWakeStatus]      = useState(null)
   const [wakeSettingsBusy,setWakeSettingsBusy]= useState(false)
+  const [wakeDiagnosticsOpen, setWakeDiagnosticsOpen] = useState(false)
 
   // ── Refs (used inside callbacks to avoid stale closures) ─────────────────
   const orbStateRef    = useRef('idle')
@@ -122,6 +167,7 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
   const interruptionTriggeredRef = useRef(false)
   const startListeningRef = useRef(null)
   const pendingListenRef = useRef(false)
+  const pendingListenTriggerRef = useRef('user')
   const streamRef      = useRef(null)
   const audioCtxRef    = useRef(null)
   const micAnalyserRef = useRef(null)
@@ -184,6 +230,15 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
       setWakeStatus(current => ({ ...current, state: 'error', error: error.message || 'Could not restart the wake listener.' }))
     } finally {
       setWakeSettingsBusy(false)
+    }
+  }
+
+  const clearWakeDiagnostics = async () => {
+    try {
+      const status = await window.arisaDesktop?.clearWakeDiagnostics?.()
+      if (status) setWakeStatus(status)
+    } catch (error) {
+      setWakeStatus(current => ({ ...current, error: error.message || 'Could not clear wake diagnostics.' }))
     }
   }
 
@@ -508,23 +563,30 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
   }, [desktopMode, playTTS])
 
   // ── Start listening ───────────────────────────────────────────────────────
-  const startListening = useCallback(async () => {
-    if (orbStateRef.current === 'listening') return
+  const startListening = useCallback(async (trigger = 'user') => {
+    if (orbStateRef.current === 'listening') {
+      if (trigger === 'wake') window.arisaDesktop?.reportWakeDiagnostic?.('wake_renderer_busy')
+      return
+    }
     if (desktopMode) window.arisaDesktop?.setVoiceState?.('starting')
     if (apiStatus === 'checking') {
       pendingListenRef.current = true
+      pendingListenTriggerRef.current = trigger
       setError('')
       setStatusHint('Arisa is starting…')
+      if (trigger === 'wake') window.arisaDesktop?.reportWakeDiagnostic?.('voice_start_waiting_for_api')
       return
     }
     if (apiStatus === 'unconfigured') {
       pendingListenRef.current = false
       setStatusHint('')
       setError('Add your Groq API key to finish setting up Arisa.')
+      if (trigger === 'wake') window.arisaDesktop?.reportWakeDiagnostic?.('voice_api_unconfigured')
       if (desktopMode) window.arisaDesktop?.setVoiceState?.('idle')
       return
     }
     pendingListenRef.current = false
+    pendingListenTriggerRef.current = 'user'
     setError('')
     setStatusHint('Waiting for you to speak…')
 
@@ -543,6 +605,7 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
         video: false,
       })
       streamRef.current = stream
+      if (trigger === 'wake') window.arisaDesktop?.reportWakeDiagnostic?.('voice_microphone_acquired')
 
       // Keep the visualiser on the processed mic signal, and apply a speech
       // band-pass filter only to the VAD analysis. The recorder still captures
@@ -583,6 +646,7 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
       rec.start(100)
       setOrbState('listening')
       setSession(true)
+      if (trigger === 'wake') window.arisaDesktop?.reportWakeDiagnostic?.('voice_listening_started')
 
       // Estimate noise before speech starts, then freeze that baseline for the
       // turn. A rolling baseline that follows louder sound can prevent silence
@@ -652,6 +716,11 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
 
     } catch (e) {
       const denied = e?.name === 'NotAllowedError'
+      if (trigger === 'wake') {
+        window.arisaDesktop?.reportWakeDiagnostic?.('voice_start_failed', {
+          error: denied ? 'Microphone permission was denied.' : `${e?.name || 'Error'}: ${e?.message || 'microphone access failed'}`,
+        })
+      }
       setError(
         denied
           ? 'Microphone access was denied — please allow it in your browser settings.'
@@ -890,18 +959,27 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
     if (apiStatus === 'ready' && pendingListenRef.current) {
       pendingListenRef.current = false
       setStatusHint('')
-      startListeningRef.current?.()
+      const trigger = pendingListenTriggerRef.current
+      pendingListenTriggerRef.current = 'user'
+      startListeningRef.current?.(trigger)
     } else if (apiStatus === 'unconfigured' && pendingListenRef.current) {
       pendingListenRef.current = false
       setStatusHint('')
       setError('Add your Groq API key to finish setting up Arisa.')
+      if (pendingListenTriggerRef.current === 'wake') window.arisaDesktop?.reportWakeDiagnostic?.('voice_api_unconfigured')
+      pendingListenTriggerRef.current = 'user'
     }
   }, [apiStatus])
 
   useEffect(() => {
     if (!desktopMode || !window.arisaDesktop?.onWake) return
-    return window.arisaDesktop.onWake(() => {
-      if (orbStateRef.current === 'idle') startListening()
+    return window.arisaDesktop.onWake(request => {
+      window.arisaDesktop?.reportWakeDiagnostic?.('wake_renderer_received', {
+        request_id: request?.request_id,
+        transcript: request?.transcript,
+      })
+      if (orbStateRef.current === 'idle') startListening('wake')
+      else window.arisaDesktop?.reportWakeDiagnostic?.('wake_renderer_busy')
     })
   }, [desktopMode, startListening])
 
@@ -938,7 +1016,7 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
     }
   }
 
-  // ── Orb click handler ─────────────────────────────────────────────────────
+  // ── Character click handler ────────────────────────────────────────────────
   const handleOrbClick = () => {
     const s = orbStateRef.current
     if (s === 'idle') startListening()
@@ -974,7 +1052,7 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
     : orbState === 'speaking' ? speakerAnalyser : null
 
   const stateLabel = {
-    idle:      apiStatus === 'checking' ? 'Starting Arisa…' : apiStatus === 'unconfigured' ? 'Add a Groq API key to start' : sessionOn ? 'Tap the orb to continue' : 'Tap the orb to speak',
+    idle:      apiStatus === 'checking' ? 'Starting Arisa…' : apiStatus === 'unconfigured' ? 'Add a Groq API key to start' : sessionOn ? 'Tap Arisa to continue' : 'Tap Arisa to speak',
     listening: 'Listening…',
     thinking:  'Thinking…',
     speaking:  'Speaking…',
@@ -1013,7 +1091,7 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
           <ArisaCharacter state={orbState} emotion={arisaEmotion} analyser={activeAnalyser} />
         </button>
 
-        <p className="voice-state-label">{statusHint || stateLabel}</p>
+        <p className={`voice-state-label voice-state-${orbState}`} role="status" aria-live="polite">{statusHint || stateLabel}</p>
 
         {orbState === 'listening' && (
           <p className="voice-hint">
@@ -1110,6 +1188,22 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
         {wakeStatus.startupError && <div className="wake-listener-error" role="alert"><AlertCircle size={15}/><span>{wakeStatus.startupError}</span></div>}
         {['error', 'stopped', 'retrying'].includes(wakeStatus.state) && wakeStatus.enabled && <button type="button" className="wake-retry-button" onClick={retryWakeListener} disabled={wakeSettingsBusy}><RefreshCw size={14}/>{wakeSettingsBusy ? 'Starting listener…' : 'Retry wake listener'}</button>}
         {wakeStatus.state === 'listening' && <p className="wake-private-note"><CheckCircle2 size={13}/> Wake phrase audio is processed on this PC and is not saved.</p>}
+        <div className="wake-diagnostics">
+          <div className="wake-diagnostics-actions">
+            <button type="button" className="wake-diagnostics-toggle" aria-expanded={wakeDiagnosticsOpen} onClick={() => setWakeDiagnosticsOpen(open => !open)}>
+              {wakeDiagnosticsOpen ? <ChevronUp size={14}/> : <ChevronDown size={14}/>} Wake diagnostics <span>({wakeStatus.diagnostics?.length || 0})</span>
+            </button>
+            {!!wakeStatus.diagnostics?.length && <button type="button" className="wake-diagnostics-clear" onClick={clearWakeDiagnostics}><Trash2 size={13}/> Clear</button>}
+          </div>
+          {wakeDiagnosticsOpen && <div className="wake-diagnostics-log" role="log" aria-live="polite" aria-label="Local wake phrase diagnostics">
+            <p>Local only: up to 50 recent events are kept in memory and cleared when Arisa exits. No microphone audio is saved.</p>
+            {!wakeStatus.diagnostics?.length
+              ? <div className="wake-diagnostic-empty">Waiting for a wake phrase. Say one of the three phrases while this status says “Listening locally.”</div>
+              : <ol>{wakeStatus.diagnostics.map((event, index) => <li key={`${event.at}-${index}`}>
+                <time>{new Date(event.at).toLocaleTimeString()}</time><span className={`wake-diagnostic-line ${event.stage === 'phrase_result' ? (event.accepted ? 'accepted' : 'rejected') : ''}`}>{wakeDiagnosticSummary(event)}</span>
+              </li>)}</ol>}
+          </div>}
+        </div>
       </section>}
 
     </div>

@@ -49,6 +49,8 @@ class DesktopIntentTests(unittest.TestCase):
     def setUp(self):
         with backend._desktop_launch_lock:
             backend._desktop_launch_times.clear()
+        with backend._desktop_response_lock:
+            backend._desktop_last_responses.clear()
 
     def test_direct_short_commands_keep_working(self):
         cases = {
@@ -112,7 +114,8 @@ class DesktopIntentTests(unittest.TestCase):
              patch.object(backend, "_request_window_close", return_value=True) as request_close, \
              patch.object(backend.time, "sleep"):
             reply = backend.close_desktop_app("spotify")
-        self.assertEqual(reply, "The visible Spotify window(s) are closed.")
+        self.assertIn("Spotify", reply)
+        self.assertIn("closed", reply)
         self.assertEqual(request_close.call_args_list, [unittest.mock.call(123), unittest.mock.call(456)])
 
     def test_close_reports_not_running_without_sending_close_message(self):
@@ -121,13 +124,16 @@ class DesktopIntentTests(unittest.TestCase):
              patch.object(backend, "_wait_for_desktop_process", return_value=False), \
              patch.object(backend, "_request_window_close") as request_close:
             reply = backend.close_desktop_app("discord")
-        self.assertEqual(reply, "Discord isn't currently running.")
+        self.assertIn("Discord", reply)
+        self.assertTrue("isn’t running" in reply or "already closed" in reply or "don’t see" in reply)
         request_close.assert_not_called()
 
     def test_close_never_touches_browser_for_tiktok(self):
         with patch.object(backend, "_desktop_app_windows") as inspect_windows:
             reply = backend.close_desktop_app("tiktok")
-        self.assertIn("can't safely close it", reply)
+        self.assertIn("TikTok", reply)
+        self.assertIn("safely", reply)
+        self.assertIn("browser page", reply)
         inspect_windows.assert_not_called()
 
     def test_untrusted_tool_arguments_are_type_checked(self):
@@ -296,9 +302,35 @@ class DesktopIntentTests(unittest.TestCase):
         with patch.object(backend.webbrowser, "open", return_value=True) as open_browser:
             first = backend.run_desktop_command("Open TikTok")
             second = backend.run_desktop_command("Open TikTok")
-        self.assertIn("TikTok is open", first)
-        self.assertIn("already opening", second)
+        self.assertIn("TikTok", first)
+        self.assertIn("browser", first)
+        self.assertTrue("opening" in second or "bringing" in second)
         open_browser.assert_called_once()
+
+    def test_action_response_variants_do_not_repeat_consecutively(self):
+        for outcome, label, detail in (
+            ("opened", "Spotify", ""),
+            ("opened_browser", "TikTok", ""),
+            ("closed", "Spotify", ""),
+            ("already_open", "Chrome", ""),
+            ("already_closed", "Discord", ""),
+            ("open_failed", "Steam", "I couldn’t find it installed."),
+            ("close_failed", "Notepad", "It may still be open."),
+            ("close_unavailable", "TikTok", "It’s a browser page."),
+        ):
+            with self.subTest(outcome=outcome):
+                replies = [backend.desktop_action_response(outcome, label, detail) for _ in range(8)]
+                self.assertTrue(all(reply and label in reply for reply in replies))
+                self.assertTrue(all(left != right for left, right in zip(replies, replies[1:])))
+
+    @unittest.skipUnless(os.name == "nt", "The desktop launcher is Windows-only.")
+    def test_opening_an_already_running_app_does_not_launch_another_instance(self):
+        with patch.object(backend, "_desktop_process_is_running", return_value=True), \
+             patch.object(backend, "_spawn_desktop_app") as spawn_app:
+            reply = backend.launch_desktop_app("spotify")
+        self.assertIn("Spotify", reply)
+        self.assertIn("already", reply)
+        spawn_app.assert_not_called()
 
 
 @unittest.skipUnless(
