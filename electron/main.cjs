@@ -594,7 +594,11 @@ app.whenReady().then(async () => {
       screenVisionEnabled: update?.enabled === true && update?.screenVision === true,
     }
     saveSettings(settings)
-    return { ...settings, sessionToken: computerSessionToken }
+    return {
+      enabled: settings.computerUseEnabled,
+      screenVision: settings.screenVisionEnabled,
+      sessionToken: computerSessionToken,
+    }
   })
   ipcMain.handle('wake:set-enabled', (_event, enabled) => setVoiceActivation(enabled))
   ipcMain.handle('wake:set-startup', (_event, enabled) => setWindowsStartup(enabled))

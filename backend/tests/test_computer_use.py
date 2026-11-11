@@ -83,7 +83,7 @@ class ComputerUseTests(unittest.TestCase):
             "observe_screen", json.dumps({"include_screenshot": True}), allow_screenshot=False,
         )
         self.assertIsNone(image)
-        self.assertIn("not enabled", json.loads(result)["error"])
+        self.assertIn("review a local preview", json.loads(result)["error"])
 
     def test_coordinate_click_requires_a_fresh_screenshot(self):
         with patch("computer_use._require_fresh_observation", return_value=object()), patch.dict(
@@ -92,22 +92,61 @@ class ComputerUseTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "require a screenshot"):
                 computer_use.computer_action("click_coordinates", target="100,200")
 
-    def test_opted_in_screenshot_is_sent_to_the_vision_model_only_after_observation(self):
+    def test_automatic_computer_tool_screenshot_is_denied_even_when_persistent_opt_in_is_on(self):
         client = FakeClient([
             completion(calls=[tool_call("observe_screen", {"include_screenshot": True})]),
-            completion("The screen shows a Notepad window."),
+            completion("Please review and approve a screenshot in Arisa before I analyze it."),
         ])
-        screenshot = "data:image/jpeg;base64,c2NyZWVu"
-        with patch("computer_use.observe_screen", return_value={"active_window": "Notepad", "controls": [], "screenshot_data_url": screenshot}):
+        with patch("computer_use.observe_screen") as observe:
             reply, _did_act = backend.create_computer_assisted_reply(
                 client, model="test-model", messages=[{"role": "user", "content": "Look at my screen."}],
                 temperature=0, max_tokens=100, allow_desktop_actions=True,
-                allow_computer_use=True, allow_screen_vision=True,
+                allow_computer_use=True, allow_screen_vision=False,
             )
-        self.assertEqual(reply, "The screen shows a Notepad window.")
-        self.assertEqual(client.requests[1]["model"], "qwen/qwen3.8-27b")
-        image_message = next(m for m in client.requests[1]["messages"] if isinstance(m.get("content"), list))
-        self.assertEqual(image_message["content"][1]["image_url"]["url"], screenshot)
+        self.assertIn("review a local preview", client.requests[1]["messages"][-1]["content"])
+        self.assertNotIn("image_url", json.dumps(client.requests[1]["messages"]))
+        self.assertIn("review and approve", reply)
+        observe.assert_not_called()
+
+    def test_screenshot_preview_is_local_and_requires_both_saved_permissions(self):
+        with patch.object(backend, "_require_screenshot_permission") as permission, \
+                patch("computer_use.observe_screen", return_value={"active_window": "Notepad", "screenshot_data_url": "data:image/jpeg;base64,c2NyZWVu"}) as capture:
+            preview = backend.computer_screenshot_preview("secret")
+        permission.assert_called_once_with("secret")
+        capture.assert_called_once_with(include_screenshot=True)
+        self.assertEqual(preview["active_window"], "Notepad")
+
+    def test_screenshot_share_requires_explicit_approval_and_valid_image(self):
+        image = "data:image/jpeg;base64,/9j/cGF5bG9hZA=="
+        sent = []
+
+        class FakeGroq:
+            def __init__(self, **_options):
+                self.chat = types.SimpleNamespace(completions=types.SimpleNamespace(create=self.create))
+
+            def create(self, **request):
+                sent.append(request)
+                return types.SimpleNamespace(choices=[types.SimpleNamespace(message=types.SimpleNamespace(content="A Notepad window is visible."))])
+
+        with patch.object(backend, "_require_screenshot_permission") as permission:
+            with self.assertRaises(backend.HTTPException) as rejected:
+                backend.computer_screenshot_share(
+                    backend.ScreenshotShareRequest(image_data_url=image, approved=False), "secret",
+                )
+            self.assertEqual(rejected.exception.status_code, 400)
+            with self.assertRaises(backend.HTTPException) as malformed:
+                backend._validate_approved_screenshot(
+                    backend.ScreenshotShareRequest(image_data_url="data:text/plain;base64,/9j/cGF5bG9hZA==", approved=True), "secret",
+                )
+            self.assertEqual(malformed.exception.status_code, 400)
+            with patch.dict(os.environ, {"GROQ_API_KEY": "test-key"}), \
+                    patch.dict("sys.modules", {"groq": types.SimpleNamespace(Groq=FakeGroq)}):
+                result = backend.computer_screenshot_share(
+                    backend.ScreenshotShareRequest(image_data_url=image, approved=True), "secret",
+                )
+        self.assertEqual(permission.call_count, 3)
+        self.assertEqual(sent[0]["messages"][0]["content"][1]["image_url"]["url"], image)
+        self.assertEqual(result, {"shared": True, "description": "A Notepad window is visible."})
 
     def test_tool_loop_observes_before_acting_and_returns_final_model_reply(self):
         client = FakeClient([

@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
-import { AlertCircle, CheckCircle2, ChevronDown, ChevronUp, MessageSquare, Mic, MicOff, RefreshCw, Send, Trash2, Volume2, X } from 'lucide-react'
+import { AlertCircle, CheckCircle2, ChevronDown, ChevronUp, MessageSquare, Mic, MicOff, RefreshCw, Send, Trash2, Volume2, X, Monitor, Shield, Upload } from 'lucide-react'
 import ArisaCharacter, { inferArisaEmotion } from './ArisaCharacter'
 
 const API              = '/api'
@@ -148,6 +148,11 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
   const [wakeSettingsBusy,setWakeSettingsBusy]= useState(false)
   const [wakeDiagnosticsOpen, setWakeDiagnosticsOpen] = useState(false)
   const [computerSettings, setComputerSettings] = useState({ enabled: false, screenVision: false, sessionToken: '' })
+  const [permissionDialog, setPermissionDialog] = useState(null)
+  const [permissionError, setPermissionError] = useState('')
+  const [screenshotBusy, setScreenshotBusy] = useState(false)
+  const [screenshotPreview, setScreenshotPreview] = useState(null)
+  const [screenshotDescription, setScreenshotDescription] = useState('')
 
   // ── Refs (used inside callbacks to avoid stale closures) ─────────────────
   const orbStateRef    = useRef('idle')
@@ -217,14 +222,72 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
 
   const updateComputerSettings = async update => {
     setWakeSettingsBusy(true)
+    setPermissionError('')
     try {
       if (update.enabled === false && computerTaskRef.current) cancelComputerTask()
       const settings = await window.arisaDesktop?.setComputerSettings?.(update)
-      if (settings) setComputerSettings(settings)
+      if (!settings) throw new Error('Arisa could not reach the desktop permission service.')
+      setComputerSettings(settings)
     } catch (error) {
-      setError(error.message || 'Could not update computer-use permissions.')
+      setPermissionError(error.message || 'Could not update computer-use permissions.')
     } finally {
       setWakeSettingsBusy(false)
+    }
+  }
+
+  const openPermissionDialog = kind => {
+    setPermissionError('')
+    setScreenshotPreview(null)
+    setScreenshotDescription('')
+    setPermissionDialog(kind)
+  }
+
+  const closePermissionDialog = () => {
+    if (screenshotBusy || wakeSettingsBusy) return
+    setPermissionDialog(null)
+    setPermissionError('')
+    setScreenshotPreview(null)
+    setScreenshotDescription('')
+  }
+
+  const captureRequestedScreenshot = async () => {
+    setScreenshotBusy(true)
+    setPermissionError('')
+    setScreenshotDescription('')
+    try {
+      const response = await fetch(`${API}/computer/screenshot-preview`, {
+        method: 'POST',
+        headers: { 'X-Arisa-Computer-Token': computerSettings.sessionToken },
+      })
+      const data = await response.json()
+      if (!response.ok) throw new Error(data.detail || 'Arisa could not capture the screen.')
+      if (!data.image_data_url?.startsWith('data:image/')) throw new Error('Arisa returned an invalid screenshot preview.')
+      setScreenshotPreview(data)
+    } catch (error) {
+      setPermissionError(error.message || 'Could not capture a screenshot.')
+    } finally {
+      setScreenshotBusy(false)
+    }
+  }
+
+  const shareApprovedScreenshot = async () => {
+    if (!screenshotPreview?.image_data_url || screenshotBusy) return
+    setScreenshotBusy(true)
+    setPermissionError('')
+    try {
+      const response = await fetch(`${API}/computer/screenshot-share`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Arisa-Computer-Token': computerSettings.sessionToken },
+        body: JSON.stringify({ image_data_url: screenshotPreview.image_data_url, approved: true }),
+      })
+      const data = await response.json()
+      if (!response.ok) throw new Error(data.detail || 'Groq could not analyze the screenshot.')
+      if (data.shared !== true || !data.description) throw new Error('Groq did not confirm the screenshot analysis.')
+      setScreenshotDescription(data.description)
+    } catch (error) {
+      setPermissionError(error.message || 'Could not share the approved screenshot.')
+    } finally {
+      setScreenshotBusy(false)
     }
   }
 
@@ -563,8 +626,9 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
       fd.append('desktop_mode', String(desktopMode))
       fd.append('computer_use', String(computerSettings.enabled))
       fd.append('screen_vision', String(computerSettings.enabled && computerSettings.screenVision))
-      const useStream = !computerSettings.enabled
-      fd.append('stream_response', String(useStream))
+      // The backend keeps ordinary voice turns streamed even when computer use
+      // is enabled. It switches to a tool result only for an explicit computer task.
+      fd.append('stream_response', 'true')
       const taskId = computerSettings.enabled ? window.crypto.randomUUID() : ''
       if (taskId) {
         computerTaskRef.current = taskId
@@ -574,7 +638,7 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
       const headers = computerSettings.sessionToken ? { 'X-Arisa-Computer-Token': computerSettings.sessionToken } : {}
       const res = await fetch(`${API}/arisa/voice`, { method: 'POST', headers, body: fd, signal: controller.signal })
       if (!res.ok) throw new Error((await readApiResult(res, 'Voice API request')).detail || 'Voice API request failed.')
-      if (!useStream) {
+      if (res.headers.get('content-type')?.includes('application/json')) {
         const data = await res.json()
         setTranscript(data.user_transcript || '')
         convIdRef.current = data.conversation_id || convIdRef.current
@@ -1258,13 +1322,13 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
         </div>
         <div className="wake-setting-row startup-row">
           <div><strong>Allow computer interaction</strong><span>For tasks you request, Arisa sends the active window title and accessible control text to Groq so it can choose actions. Close sensitive windows first.</span></div>
-          <button type="button" className={`wake-switch ${computerSettings.enabled ? 'enabled' : ''}`} role="switch" aria-checked={computerSettings.enabled} aria-label="Allow computer interaction" disabled={wakeSettingsBusy} onClick={() => updateComputerSettings({ enabled: !computerSettings.enabled, screenVision: !computerSettings.enabled && computerSettings.screenVision })}><i /></button>
+          <button type="button" className="permission-open-button" aria-label="Open computer interaction permissions" onClick={() => openPermissionDialog('computer')}><Shield size={13}/>{computerSettings.enabled ? 'Manage' : 'Allow'}</button>
         </div>
         <div className="wake-setting-row startup-row">
           <div><strong>Share requested screenshots with Groq</strong><span>Also send a screenshot when visual detail is needed. It may contain private information; close sensitive windows first.</span></div>
-          <button type="button" className={`wake-switch ${computerSettings.screenVision ? 'enabled' : ''}`} role="switch" aria-checked={computerSettings.screenVision} aria-label="Allow screenshot sharing" disabled={wakeSettingsBusy || !computerSettings.enabled} onClick={() => updateComputerSettings({ enabled: true, screenVision: !computerSettings.screenVision })}><i /></button>
+          <button type="button" className="permission-open-button" aria-label="Open screenshot review and sharing" onClick={() => openPermissionDialog('screenshot')}><Monitor size={13}/>Review</button>
         </div>
-        <p className="wake-private-note"><CheckCircle2 size={13}/> Both permissions are off by default. Arisa uses screen information only for tasks you request; screenshot images require the second switch.</p>
+        <p className="wake-private-note"><CheckCircle2 size={13}/> Computer access is opt-in. Screenshot images stay local until you review one and approve sharing.</p>
         {wakeStatus.error && <div className="wake-listener-error" role="alert"><AlertCircle size={15}/><span>{wakeStatus.error}</span></div>}
         {wakeStatus.startupError && <div className="wake-listener-error" role="alert"><AlertCircle size={15}/><span>{wakeStatus.startupError}</span></div>}
         {['error', 'stopped', 'retrying'].includes(wakeStatus.state) && wakeStatus.enabled && <button type="button" className="wake-retry-button" onClick={retryWakeListener} disabled={wakeSettingsBusy}><RefreshCw size={14}/>{wakeSettingsBusy ? 'Starting listener…' : 'Retry wake listener'}</button>}
@@ -1286,6 +1350,36 @@ export default function VoiceMode({ onSwitchToText, desktopMode = false }) {
           </div>}
         </div>
       </section>}
+
+      {desktopMode && permissionDialog && <div className="permission-modal-scrim" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) closePermissionDialog() }}>
+        <section className="permission-modal" role="dialog" aria-modal="true" aria-labelledby="permission-modal-title">
+          <button type="button" className="permission-modal-close" onClick={closePermissionDialog} aria-label="Close permissions" disabled={screenshotBusy || wakeSettingsBusy}><X size={17}/></button>
+          {permissionDialog === 'computer' ? <>
+            <div className="permission-modal-icon"><Shield size={18}/></div>
+            <h2 id="permission-modal-title">Computer interaction</h2>
+            <p>Choose whether Arisa may inspect accessible controls in the active window and perform the computer actions you request. This setting is saved by the desktop app.</p>
+            <div className="permission-modal-row"><div><strong>Allow computer interaction</strong><span>Required for app and computer-use tasks.</span></div><button type="button" className={`wake-switch ${computerSettings.enabled ? 'enabled' : ''}`} role="switch" aria-checked={computerSettings.enabled} aria-label="Allow computer interaction" disabled={wakeSettingsBusy} onClick={() => updateComputerSettings({ enabled: !computerSettings.enabled, screenVision: !computerSettings.enabled && computerSettings.screenVision })}><i /></button></div>
+            <div className="permission-modal-row"><div><strong>Enable screenshot sharing</strong><span>Arisa will still ask you to review and approve each screenshot before Groq receives it.</span></div><button type="button" className={`wake-switch ${computerSettings.screenVision ? 'enabled' : ''}`} role="switch" aria-checked={computerSettings.screenVision} aria-label="Enable screenshot sharing" disabled={wakeSettingsBusy || !computerSettings.enabled} onClick={() => updateComputerSettings({ enabled: true, screenVision: !computerSettings.screenVision })}><i /></button></div>
+            {permissionError && <div className="permission-modal-error" role="alert"><AlertCircle size={14}/>{permissionError}</div>}
+            <div className="permission-modal-actions"><button type="button" className="permission-secondary" onClick={closePermissionDialog} disabled={wakeSettingsBusy}>Done</button></div>
+          </> : <>
+            <div className="permission-modal-icon"><Monitor size={18}/></div>
+            <h2 id="permission-modal-title">Share a requested screenshot</h2>
+            <p>Arisa captures a preview on this PC. Nothing is sent to Groq until you review the image and press <strong>Approve and share</strong>.</p>
+            {!computerSettings.enabled || !computerSettings.screenVision ? <div className="permission-prerequisite"><span>Enable computer interaction and screenshot sharing first.</span><button type="button" className="permission-open-button" onClick={() => openPermissionDialog('computer')}><Shield size={13}/>Open permissions</button></div> : <>
+              {screenshotPreview && <div className="screenshot-review"><img src={screenshotPreview.image_data_url} alt={`Screenshot preview of ${screenshotPreview.active_window || 'the active window'}`}/><span>Captured locally · {screenshotPreview.active_window || 'Active window'}</span></div>}
+              {screenshotDescription && <div className="screenshot-analysis" role="status"><strong>Groq’s response</strong><p>{screenshotDescription}</p></div>}
+              {permissionError && <div className="permission-modal-error" role="alert"><AlertCircle size={14}/>{permissionError}</div>}
+              <div className="permission-modal-actions">
+                <button type="button" className="permission-secondary" onClick={closePermissionDialog} disabled={screenshotBusy}>Cancel</button>
+                {!screenshotPreview ? <button type="button" className="permission-primary" onClick={captureRequestedScreenshot} disabled={screenshotBusy}>{screenshotBusy ? 'Capturing…' : 'Capture preview'}</button>
+                  : <><button type="button" className="permission-secondary" onClick={captureRequestedScreenshot} disabled={screenshotBusy}>Capture again</button><button type="button" className="permission-primary" onClick={shareApprovedScreenshot} disabled={screenshotBusy || !!screenshotDescription}><Upload size={14}/>{screenshotBusy ? 'Sharing…' : screenshotDescription ? 'Shared' : 'Approve and share'}</button></>}
+              </div>
+            </>}
+            {permissionError && (!computerSettings.enabled || !computerSettings.screenVision) && <div className="permission-modal-error" role="alert"><AlertCircle size={14}/>{permissionError}</div>}
+          </>}
+        </section>
+      </div>}
 
     </div>
   )

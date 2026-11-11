@@ -127,6 +127,22 @@ class FakeSyncClient:
 
 
 class VoiceGenerationTests(unittest.TestCase):
+    def test_voice_conversation_keeps_streaming_when_computer_use_is_enabled(self):
+        self.assertTrue(backend.voice_turn_uses_streaming(
+            "Can you explain how photosynthesis works?", requested=True, computer_allowed=True,
+        ))
+        self.assertTrue(backend.voice_turn_uses_streaming(
+            "I like Spotify and use Chrome every day.", requested=True, computer_allowed=True,
+        ))
+
+    def test_explicit_computer_tasks_use_the_verified_action_path(self):
+        self.assertFalse(backend.voice_turn_uses_streaming(
+            "Please launch Spotify for me.", requested=True, computer_allowed=True,
+        ))
+        self.assertTrue(backend.voice_turn_uses_streaming(
+            "Please launch Spotify for me.", requested=True, computer_allowed=False,
+        ))
+
     def test_only_standalone_authorized_interruption_words_pass_the_gate(self):
         authorized = {
             "STOP": "stop",
