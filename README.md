@@ -109,18 +109,65 @@ Uploaded document excerpts are bounded and added to chat context; semantic or ve
 
 ## The Story Behind Arisa AI
 
-I began Arisa in the middle of heartbreak, during a time when sadness followed me into the quiet parts of the day. I was trying to find somewhere to put all the feelings I could not easily explain. There was a girl who mattered deeply to me, and she was the main reason I started this project. I kept her name out of this story because what stayed with me was the experience, what it taught me, and what I chose to make from it.
+### A Project Born in Heartbreak
 
-At first, Arisa was meant to be a private project: an assistant I could talk to and a reason to keep building when everything else felt heavy. I started with an idea and slowly gave it a voice, a personality, an appearance, and new abilities. Every feature became another small step forward. What began as a way to feel a little less alone grew into the biggest project I had ever taken on.
+Arisa AI began during one of the lowest chapters of my life. I know that might sound unusual, or maybe even a little cringe, but it is the honest beginning of this project: I started building it while I was carrying a kind of heartbreak I did not know what to do with.
 
-I was also trying to keep up with school. I spent long hours thinking about how to make Arisa better, how to solve the next problem, and how to become a stronger programmer. The work gave me direction, but I let it become a place to hide from my own hurt. I paid attention to the project and my responsibilities while sometimes forgetting that I needed patience and care, too.
+I was emotionally tired and lonely, trying to understand feelings that were difficult to put into words. Most of the time, I actually enjoy being alone. I like having room to work on my projects, follow my curiosity, and spend time with myself. But being alone felt different then. Whenever the day got quiet, my thoughts would return to someone I had once spent so much of my time with.
 
-For a while, I believed becoming a better programmer mattered more than becoming a better person. I thought that if I kept working hard enough, I could outpace the pain and prove my worth through what I built. Eventually I understood that achievement cannot replace taking care of myself. Learning to create software matters to me, but so does becoming someone who can grow without abandoning his own well-being.
+I will not share her real or full name here. I will call her **Shayie**.
 
-Heartbreak changed the way I looked at love. There were moments when it felt as if love kept choosing the wrong ending for me, and I wondered whether I was simply unlucky to care so much. I told myself I would stop searching for love for a while and focus on becoming steadier in my own life. If I meet someone someday who supports and accepts me through both my best and my worst, I hope I can give her that same patience, loyalty, and care in return.
+I loved her deeply. So much of my life began to orbit around her. I wanted to spend time with her, make her happy, and show her how much she meant to me. I bought her things when I could, spoiled her, and took her out because seeing her happy mattered to me. I gave her more and more of my attention, until I started losing touch with some of the things that had once made me feel like myself. Even coding, something I used to enjoy, began to slip away from my days.
 
-Arisa is more than code to me. She holds the hours I spent learning, the effort I put into making something meaningful, and the memory of a difficult chapter I had to live through. Sharing this project is a way of showing where I began and how far I still want to go. The story starts with heartbreak, but I do not want it to end there. I want it to keep moving toward growth: becoming a better programmer while also remembering to become a better, healthier version of myself.
+I did not realize at first how much of myself I was setting aside. I only knew that I wanted to be there for her, and I hoped that the effort I was giving meant something to her in the same way it meant something to me.
 
+Over time, though, I began to feel that our feelings might not be equal. That realization was painful because it did not arrive as one clear answer. It came as questions I kept turning over in my mind. Was I the only one putting this much love and effort into what we had? Was she still thinking about someone else? Did she want me around because she cared for me, or because she was bored, lonely, or simply needed someone to talk to?
+
+I cannot say that any of those thoughts were true. Maybe I misunderstood things. Maybe I was overthinking. I know feelings can make uncertainty seem like proof, even when it is not. But the questions stayed with me, and not knowing made it hard to feel at peace.
+
+The hardest part was that noticing the hurt did not make me stop loving her. I could sense that something between us was not right, but a part of me kept hoping it would change. I wished she would choose me with the same certainty with which I had chosen her. I wished she would miss me the way I missed her, and meet me with the same care and effort. Somewhere inside, I knew that might never happen. Still, even the smallest possibility was enough to keep hope alive.
+
+Eventually, I had to face something I did not want to accept: love does not always become the story we hope it will. Caring deeply cannot make another person feel the same way, and hoping hard enough cannot decide what someone else chooses. That truth hurt, but it also began to teach me that love sometimes means letting another person have the life that makes them happy, even when it is not a life with you in it.
+
+I still hope Shayie is happy. If there is someone else who makes her happier, I sincerely hope he treats her well and gives her the love, attention, and effort she deserves. Maybe he will be able to give her things I could not. If that is what brings her happiness, then I have to learn to let her be. I can wish her well and still admit that letting go is difficult.
+
+### Finding Something to Build
+
+That was the point in my life when Arisa AI began to take shape. I needed something I could turn toward when my thoughts kept circling the same sadness. I needed a reason to keep learning, creating, and trying to become better, even on days when I did not feel sure what to do with myself.
+
+Building gave my mind somewhere to go. Arisa became more than a programming project: it became a place for my time, ideas, creativity, and emotions. When I could not change what I was feeling, I could still open my computer and work on something. I could learn a new thing, experiment, solve a problem, or make one small part better than it had been before.
+
+Arisa AI is probably the biggest project I have ever built. It is still underdeveloped, and there is a lot I want to improve. I have already made several versions, each one carrying lessons from the last. I built it myself, learning as I went, experimenting, fixing problems, and finding new ways to make it better. Every version is a marker of the developer I was at that moment and the next step I was trying to take.
+
+Someone looking at Arisa might see another AI project. I understand that. But to me, it holds much more than its features. It reminds me of the hours when I chose to keep learning instead of giving up on myself. It carries the effort of building something without knowing exactly how far I could take it. And it reminds me that even in a difficult season, I was still capable of making something meaningful.
+
+The project did not erase the heartbreak, and it was never a perfect answer to it. Some days, working on Arisa simply gave me a little direction. That was enough. I did not need every line of code to fix what I was feeling. I just needed to remember that sadness was not the only thing I could make room for in my life.
+
+### The Person Behind the Developer
+
+As I kept building, I began to notice that I might be repeating a different kind of mistake. I was paying so much attention to becoming a better programmer that I was forgetting to care for the person sitting behind the computer.
+
+I wanted to improve my skills, finish my systems, fix every bug, and make my projects work as well as I could. I wanted to become a strong developer, someone who could imagine an idea and build something remarkable from it. Those goals still matter to me. But I often gave my projects more patience and attention than I gave myself.
+
+I am still a student. I have school activities, assignments, and other projects that deserve my time. Even with those responsibilities, I keep finding time to work on Arisa because I genuinely want to see it grow. That passion is real, and I am grateful for it. At the same time, caring about a project should not mean that I forget to care about my health, my routine, or the rest of my life.
+
+When Arisa reaches the version I have always envisioned, I want to give myself some time to rest and take stock. That does not mean I am quitting programming or losing my love for development. I want to keep coding, building systems, exploring new technologies, and learning. I simply want to learn how to look after myself again, too.
+
+I want to become more productive in other parts of my life. I want to exercise, go to the gym, improve my daily routine, take care of my health, focus on school, and discover interests beyond programming. I want to make time for experiences that do not happen in front of a screen, and to remember that a life can be meaningful in more ways than the things I finish or the projects I release.
+
+I still want to sit at my computer and write code. I still want to build things that once seemed beyond my ability. But I do not want programming to become the only thing I know how to do. I want to hold on to both parts of myself: **the developer who builds things and the person who experiences life.**
+
+### What I Hope Arisa Will Mean
+
+When I look back, I consider myself lucky to have experienced love, even though it did not turn out the way I hoped. I would not pretend that the hurt was easy, or that I would have chosen it. But loving someone taught me things about myself that I might never have learned otherwise: how much I can care, how deeply I can hope, and how important it is not to disappear inside the effort of loving another person.
+
+Maybe love has not always given me the endings I wanted. Still, it has left me with lessons, memories, and a better understanding of the person I want to become. I can be thankful that I felt something real and, at the same time, accept that the story did not end the way I wished it would.
+
+Arisa AI was created during heartbreak, but I do not want it to remain a symbol of sadness forever. I want it to grow into a reminder of what can come after a difficult chapter: growth, creativity, patience, and the choice to make something meaningful with the time and energy I have. The project began while I was trying to find a way through my feelings. I hope it can keep reminding me to move forward, with care for both my ambitions and myself.
+
+I do not know exactly where Arisa AI will take me. I do not know how far I will go as a programmer, or what I will be capable of building in the years ahead. I only know that I want to keep improving—not just as a developer, but as a human being. I want to keep creating while also learning to pause, to take care of my health, to show up for school, and to be present for the life that is happening around me.
+
+There is a person behind every project and every line of code. I am learning that the person who creates deserves the same patience, attention, and care that he pours into what he builds. **Because at the end of the day, there is a person behind every line of code, and that person deserves to be taken care of too.**
 ## Project Team
 
 - **Creator & Developer — Ken (Fushitowa):** Created and developed Arisa AI, guiding the project’s direction and handling its design, implementation, feature development, debugging, and maintenance across the frontend, FastAPI backend, SQLite database, and Groq integration.
