@@ -171,4 +171,3 @@ There is a person behind every project and every line of code. I am learning tha
 ## Project Team
 
 - **Creator & Developer — Ken (Fushitowa):** Created and developed Arisa AI, guiding the project’s direction and handling its design, implementation, feature development, debugging, and maintenance across the frontend, FastAPI backend, SQLite database, and Groq integration.
-end to end development
